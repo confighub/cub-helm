@@ -1,0 +1,8 @@
+replicas: 1
+image: nginx:1.25
+
+# When enabled, an extra ConfigMap template renders; when disabled the template
+# renders empty. Used to exercise upgrade reconciliation (unit creation and
+# deletion) without a second chart version.
+extra:
+  enabled: false

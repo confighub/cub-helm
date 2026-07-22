@@ -67,6 +67,11 @@ go build ./...
 go test ./...
 ```
 
+`test/smoke.sh` is an end-to-end test that installs, upgrades, and reconciles
+the local fixture chart against a running ConfigHub server. It needs the plugin
+installed and the current `cub` context pointed at a localhost server; run it
+with `CUB=/path/to/cub test/smoke.sh`.
+
 Install the locally-built binary as a plugin (overrides any released one):
 
 ```

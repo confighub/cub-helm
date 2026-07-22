@@ -1,0 +1,5 @@
+apiVersion: v2
+name: smoke
+description: A local chart fixture for exercising cub helm install/upgrade.
+version: 0.1.0
+appVersion: "1.0.0"
