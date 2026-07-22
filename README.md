@@ -31,68 +31,27 @@ cub helm version
 
 ## Commands
 
-### `cub helm install <release-name> <chart-ref>`
+- `cub helm install <release-name> <chart-ref>` — render a chart and install it
+  as a ConfigHub component (creates the `<component>-base` and `<component>-helm`
+  spaces).
+- `cub helm upgrade <release-name>` — re-render a release from its stored
+  `HelmSource` and reconcile the base's units.
+- `cub helm template <release-name> <chart-ref>` — render a chart locally and
+  preview the units `cub helm install` would create, with no server connection.
 
-Render a Helm chart and install it as a ConfigHub component. The chart reference
-may be an `oci://` reference, a local chart directory, or a chart name resolved
-against `--repo`. Creates the `<component>-base` and `<component>-helm` spaces if
-missing (component defaults to the release name).
+Run any command with `--help` for its flags, and see the
+[full guide](docs/guide.md) for the end-to-end workflow (values, namespaces,
+CRDs, hooks, creating deployments, and upgrades).
 
 ```
 # Install a chart as component "cubbychat"
 cub helm install cubbychat oci://ghcr.io/confighub/charts/cubbychat
 
-# Add a second chart to the same component; its units are prefixed "pg-"
-cub helm install --component cubbychat --prefix pg pg oci://registry-1.docker.io/bitnamicharts/postgresql
-
-# Explicit namespace and a synthesized Namespace unit
-cub helm install --namespace cert-manager --create-namespace cert-manager jetstack/cert-manager --version v1.17.1
-```
-
-### `cub helm upgrade <release-name>`
-
-Re-render a release from its `HelmSource` unit and reconcile the base space's
-units. Flags patch the `HelmSource` first (`--version` replaces the chart
-version constraint; `-f`/`--set` replace the stored values). With no flags,
-upgrade is a plain re-render — the way a hand-edit of the `HelmSource` unit is
-applied.
-
-```
-# Upgrade to a new chart version
-cub helm upgrade cubbychat --version 1.3.0
-
-# Change values (replaces the stored values)
-cub helm upgrade cubbychat -f values.yaml --set ai.enabled=true
-
-# Re-render after editing the HelmSource unit by hand
-cub helm upgrade cubbychat
-```
-
-### `cub helm template <release-name> <chart-ref>`
-
-Render a chart locally and show the units `cub helm install` would generate,
-without a server connection. Writes to stdout by default, or one `<slug>.yaml`
-file per unit with `--output-dir`.
-
-```
-cub helm template cubbychat oci://ghcr.io/confighub/charts/cubbychat
+# Preview what install would create, offline
 cub helm template cubbychat ./charts/cubbychat --output-dir ./out
-```
 
-## How it maps to ConfigHub
-
-Rendered output becomes one unit per chart template file, named from the chart's
-file layout: `templates/backend.yaml` becomes unit `backend`,
-`templates/rbac/role.yaml` becomes `rbac-role`, `crds/foo.yaml` becomes
-`crds-foo`, and subchart files are prefixed with the subchart name. When a
-component contains multiple releases, each release's units are namespaced with
-`--prefix` (defaulted to the release name for the second and later releases).
-
-The base is untargeted. If `--namespace` is not given, the release renders with
-the `confighubplaceholder` namespace, which each deployment fills:
-
-```
-cub variant create <variant> <component>-base --target <space>/<target> --namespace <ns>
+# Upgrade the chart version; the change lands in the base
+cub helm upgrade cubbychat --version 1.3.0
 ```
 
 ## Development
