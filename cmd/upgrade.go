@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"encoding/base64"
 	"fmt"
 
 	"github.com/spf13/cobra"
@@ -77,11 +76,11 @@ Examples:
 			if sourceUnit == nil {
 				return fmt.Errorf("release %q is not installed in component %q; run 'cub helm install' first", releaseName, component)
 			}
-			data, err := base64.StdEncoding.DecodeString(sourceUnit.Data)
+			data, err := cub.GetUnitData(sourceUnit.SpaceID, sourceUnit.UnitID)
 			if err != nil {
-				return fmt.Errorf("failed to decode HelmSource unit %q: %w", sourceUnit.Slug, err)
+				return fmt.Errorf("failed to read HelmSource unit %q: %w", sourceUnit.Slug, err)
 			}
-			src, err := helmutils.ParseHelmSource(data)
+			src, err := helmutils.ParseHelmSource([]byte(data))
 			if err != nil {
 				return err
 			}

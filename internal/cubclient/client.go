@@ -92,7 +92,7 @@ func (c *Client) PatchSpace(spaceID uuid.UUID, patch []byte) (*goclient.Space, e
 }
 
 // ListUnits returns the units in a space matching the optional where filter
-// (pass "" for all). All fields are returned, including Data and Labels.
+// (pass "" for all). Configuration is not part of a unit; see ListUnitData.
 func (c *Client) ListUnits(spaceID uuid.UUID, where string) ([]*goclient.Unit, error) {
 	params := &goclient.ListUnitsParams{}
 	if where != "" {
@@ -141,25 +141,24 @@ func (c *Client) GetUnit(spaceID, unitID uuid.UUID) (*goclient.Unit, error) {
 	return res.JSON200.Unit, nil
 }
 
-// CreateUnit creates a unit and returns it.
+// CreateUnit creates a unit and returns it. Configuration is not a field of a
+// unit; write it with PutUnitData once the unit exists.
 func (c *Client) CreateUnit(spaceID uuid.UUID, unit goclient.Unit) (*goclient.Unit, error) {
 	res, err := c.api.CreateUnitWithResponse(c.ctx, spaceID, &goclient.CreateUnitParams{}, unit)
 	if cubapi.IsAPIError(err, res) {
 		return nil, cubapi.InterpretErrorGeneric(err, res)
 	}
-	if res.JSON200 == nil {
-		return nil, fmt.Errorf("unexpected response status %s", res.Status())
-	}
-	return res.JSON200, nil
+	return unitFromWrite(res.JSON200, res.Status())
 }
 
-// UpdateUnit updates a unit and returns the result.
+// UpdateUnit updates a unit's metadata (labels, target, and so on) and returns
+// the result. It does not touch the unit's configuration; see PutUnitData.
 func (c *Client) UpdateUnit(spaceID uuid.UUID, unit *goclient.Unit) (*goclient.Unit, error) {
 	res, err := c.api.UpdateUnitWithResponse(c.ctx, spaceID, unit.UnitID, &goclient.UpdateUnitParams{}, *unit)
 	if cubapi.IsAPIError(err, res) {
 		return nil, cubapi.InterpretErrorGeneric(err, res)
 	}
-	return res.JSON200, nil
+	return unitFromWrite(res.JSON200, res.Status())
 }
 
 // DeleteUnit deletes a unit.
@@ -169,4 +168,68 @@ func (c *Client) DeleteUnit(spaceID, unitID uuid.UUID) error {
 		return cubapi.InterpretErrorGeneric(err, res)
 	}
 	return nil
+}
+
+// GetUnitData returns a unit's configuration as the server stores it (not
+// base64-encoded).
+func (c *Client) GetUnitData(spaceID, unitID uuid.UUID) (string, error) {
+	res, err := c.api.DownloadUnitDataWithResponse(c.ctx, spaceID, unitID)
+	if err != nil {
+		return "", err
+	}
+	if res == nil {
+		return "", fmt.Errorf("no response from server")
+	}
+	// The success body is the configuration itself, so there is no JSON200 for
+	// cubapi.IsAPIError to inspect; check the status directly.
+	if res.StatusCode() != http.StatusOK {
+		return "", fmt.Errorf("failed to fetch data of unit %s: %s", unitID, res.Status())
+	}
+	return string(res.Body), nil
+}
+
+// PutUnitData replaces a unit's configuration and returns the unit as it
+// stands after the write, including any apply gates the write set.
+func (c *Client) PutUnitData(spaceID, unitID uuid.UUID, data string) (*goclient.Unit, error) {
+	res, err := c.api.UploadUnitDataWithBodyWithResponse(c.ctx, spaceID, unitID,
+		&goclient.UploadUnitDataParams{}, "application/octet-stream", strings.NewReader(data))
+	if cubapi.IsAPIError(err, res) {
+		return nil, cubapi.InterpretErrorGeneric(err, res)
+	}
+	return unitFromWrite(res.JSON200, res.Status())
+}
+
+// ListUnitData returns the configuration of every unit in the space matching
+// the optional where filter (pass "" for all), keyed by unit ID, in a single
+// request. Use it alongside ListUnits when the units' content is needed too.
+func (c *Client) ListUnitData(spaceID uuid.UUID, where string) (map[uuid.UUID]string, error) {
+	// The data search endpoint is organization-wide, so the space is part of
+	// the where clause. The filter grammar has no grouping; AND is the only
+	// conjunction, so plain concatenation is unambiguous.
+	scoped := fmt.Sprintf("SpaceID = '%s'", spaceID)
+	if where != "" {
+		scoped = where + " AND " + scoped
+	}
+	res, err := c.api.SearchUnitDataWithResponse(c.ctx, &goclient.SearchUnitDataParams{Where: &scoped})
+	if cubapi.IsAPIError(err, res) {
+		return nil, cubapi.InterpretErrorGeneric(err, res)
+	}
+	data := map[uuid.UUID]string{}
+	if res.JSON200 == nil {
+		return data, nil
+	}
+	for _, row := range *res.JSON200 {
+		data[row.UnitID] = row.Data
+	}
+	return data, nil
+}
+
+// unitFromWrite extracts the unit from a create, update, or data-write
+// response. A write answers with the operation's result rather than the
+// entity; the unit is inside it.
+func unitFromWrite(resp *goclient.UnitCreateOrUpdateResponse, status string) (*goclient.Unit, error) {
+	if resp == nil || resp.Unit == nil {
+		return nil, fmt.Errorf("the server returned no unit (status %s)", status)
+	}
+	return resp.Unit, nil
 }

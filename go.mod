@@ -5,8 +5,8 @@ go 1.25.0
 toolchain go1.25.11
 
 require (
-	github.com/confighub/sdk/bridge-impl v0.1.98
-	github.com/confighub/sdk/core v0.1.98
+	github.com/confighub/sdk/bridge-impl v0.2.10
+	github.com/confighub/sdk/core v0.4.15
 	github.com/google/uuid v1.6.0
 	github.com/spf13/cobra v1.10.2
 )

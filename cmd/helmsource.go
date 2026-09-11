@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"encoding/base64"
 	"errors"
 	"fmt"
 	"maps"
@@ -27,13 +26,17 @@ func listHelmSources(sourceSpaceID uuid.UUID) ([]helmSourceUnit, error) {
 	if err != nil {
 		return nil, err
 	}
+	content, err := cub.ListUnitData(sourceSpaceID, "")
+	if err != nil {
+		return nil, err
+	}
 	sources := make([]helmSourceUnit, 0, len(units))
 	for _, u := range units {
-		data, err := base64.StdEncoding.DecodeString(u.Data)
-		if err != nil {
+		data, ok := content[u.UnitID]
+		if !ok {
 			continue
 		}
-		src, err := helmutils.ParseHelmSource(data)
+		src, err := helmutils.ParseHelmSource([]byte(data))
 		if err != nil {
 			tprint("Warning: unit %s in the helm source space is not a valid HelmSource: %v", u.Slug, err)
 			continue
@@ -133,9 +136,13 @@ func upsertHelmSourceUnit(sourceSpaceID uuid.UUID, src *helmutils.HelmSource, la
 		return nil
 	}
 
-	existing.Data = base64.StdEncoding.EncodeToString(data)
-	mergeLabels(existing, labels)
-	updated, err := cub.UpdateUnit(existing.SpaceID, existing)
+	if !labelsMatch(existing.Labels, labels) {
+		mergeLabels(existing, labels)
+		if _, err := cub.UpdateUnit(existing.SpaceID, existing); err != nil {
+			return fmt.Errorf("failed to update HelmSource unit %q: %w", slug, err)
+		}
+	}
+	updated, err := cub.PutUnitData(existing.SpaceID, existing.UnitID, string(data))
 	if err != nil {
 		return fmt.Errorf("failed to update HelmSource unit %q: %w", slug, err)
 	}
@@ -148,7 +155,12 @@ func upsertHelmSourceUnit(sourceSpaceID uuid.UUID, src *helmutils.HelmSource, la
 // source file disappeared are deleted.
 func reconcileHelmUnits(baseSpaceID uuid.UUID, src *helmutils.HelmSource, result *helmutils.GenerateResult) error {
 	release := src.Spec.Release.Name
-	existing, err := cub.ListUnits(baseSpaceID, fmt.Sprintf("Labels.%s = '%s'", helmutils.HelmReleaseLabel, release))
+	where := fmt.Sprintf("Labels.%s = '%s'", helmutils.HelmReleaseLabel, release)
+	existing, err := cub.ListUnits(baseSpaceID, where)
+	if err != nil {
+		return err
+	}
+	existingData, err := cub.ListUnitData(baseSpaceID, where)
 	if err != nil {
 		return err
 	}
@@ -161,15 +173,21 @@ func reconcileHelmUnits(baseSpaceID uuid.UUID, src *helmutils.HelmSource, result
 	for _, gen := range result.Units {
 		desired[gen.Slug] = true
 		if ex, ok := existingBySlug[gen.Slug]; ok {
-			current, decodeErr := base64.StdEncoding.DecodeString(ex.Data)
-			if decodeErr == nil && string(current) == gen.Content && labelsMatch(ex.Labels, result.UnitLabels) {
+			contentMatches := existingData[ex.UnitID] == gen.Content
+			if contentMatches && labelsMatch(ex.Labels, result.UnitLabels) {
 				continue
 			}
-			ex.Data = base64.StdEncoding.EncodeToString([]byte(gen.Content))
-			mergeLabels(ex, result.UnitLabels)
-			updated, err := cub.UpdateUnit(ex.SpaceID, ex)
-			if err != nil {
-				return fmt.Errorf("failed to update unit %q: %w", gen.Slug, err)
+			updated := ex
+			if !labelsMatch(ex.Labels, result.UnitLabels) {
+				mergeLabels(ex, result.UnitLabels)
+				if updated, err = cub.UpdateUnit(ex.SpaceID, ex); err != nil {
+					return fmt.Errorf("failed to update unit %q: %w", gen.Slug, err)
+				}
+			}
+			if !contentMatches {
+				if updated, err = cub.PutUnitData(ex.SpaceID, ex.UnitID, gen.Content); err != nil {
+					return fmt.Errorf("failed to update unit %q: %w", gen.Slug, err)
+				}
 			}
 			if wait {
 				if err := awaitTriggersRemoval(updated); err != nil {
@@ -220,15 +238,21 @@ func reconcileHelmUnits(baseSpaceID uuid.UUID, src *helmutils.HelmSource, result
 	return nil
 }
 
-// createUnitInSpace creates a unit with the given content and labels.
+// createUnitInSpace creates a unit with the given content and labels. The
+// server keeps configuration apart from the unit, so this is a create followed
+// by a data write. If the write fails the empty unit is left in place: it
+// exists, and the caller can write to it again.
 func createUnitInSpace(spaceID uuid.UUID, slug, toolchainType, content string, labels map[string]string) (*goclient.Unit, error) {
-	return cub.CreateUnit(spaceID, goclient.Unit{
+	created, err := cub.CreateUnit(spaceID, goclient.Unit{
 		SpaceID:       spaceID,
 		Slug:          slug,
 		ToolchainType: toolchainType,
-		Data:          base64.StdEncoding.EncodeToString([]byte(content)),
 		Labels:        labels,
 	})
+	if err != nil {
+		return nil, err
+	}
+	return cub.PutUnitData(spaceID, created.UnitID, content)
 }
 
 // mergeLabels sets the given labels on the unit, preserving unrelated ones.
