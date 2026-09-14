@@ -88,7 +88,7 @@ func (c *Client) PatchSpace(spaceID uuid.UUID, patch []byte) (*goclient.Space, e
 }
 
 // ListUnits returns the units in a space matching the optional where filter
-// (pass "" for all). Configuration is not part of a unit; see ListUnitData.
+// (pass "" for all). Configuration is not part of a unit; see GetUnitData.
 func (c *Client) ListUnits(spaceID uuid.UUID, where string) ([]*goclient.Unit, error) {
 	params := &goclient.ListUnitsParams{}
 	if where != "" {
@@ -172,31 +172,6 @@ func (c *Client) PutUnitData(spaceID, unitID uuid.UUID, data string) (*goclient.
 		return nil, cubapi.InterpretErrorGeneric(err, res)
 	}
 	return unitFromWrite(res.JSON200, res.Status())
-}
-
-// ListUnitData returns the configuration of every unit in the space matching
-// the optional where filter (pass "" for all), keyed by unit ID, in a single
-// request. Use it alongside ListUnits when the units' content is needed too.
-func (c *Client) ListUnitData(spaceID uuid.UUID, where string) (map[uuid.UUID]string, error) {
-	// The data search endpoint is organization-wide, so the space is part of
-	// the where clause. The filter grammar has no grouping; AND is the only
-	// conjunction, so plain concatenation is unambiguous.
-	scoped := fmt.Sprintf("SpaceID = '%s'", spaceID)
-	if where != "" {
-		scoped = where + " AND " + scoped
-	}
-	res, err := c.api.SearchUnitDataWithResponse(c.ctx, &goclient.SearchUnitDataParams{Where: &scoped})
-	if cubapi.IsAPIError(err, res) {
-		return nil, cubapi.InterpretErrorGeneric(err, res)
-	}
-	data := map[uuid.UUID]string{}
-	if res.JSON200 == nil {
-		return data, nil
-	}
-	for _, row := range *res.JSON200 {
-		data[row.UnitID] = row.Data
-	}
-	return data, nil
 }
 
 // unitFromWrite extracts the unit from a create, update, or data-write

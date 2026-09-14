@@ -50,14 +50,13 @@ func TestMakeSlug(t *testing.T) {
 	}
 }
 
-// A release's upload names the component's base, owns its Units by release
-// name, and prefixes new slugs with the unit prefix and a "-".
+// A release's upload names the component's base and owns its Units by release
+// name.
 func TestUploadRequest(t *testing.T) {
 	src := &helmrender.HelmSource{
 		Spec: helmrender.HelmSourceSpec{
 			Chart:           helmrender.HelmSourceChart{Ref: "oci://example.com/charts/pg"},
 			Release:         helmrender.HelmSourceRelease{Name: "pg"},
-			UnitPrefix:      "pg",
 			CreateNamespace: true,
 		},
 	}
@@ -81,7 +80,7 @@ func TestUploadRequest(t *testing.T) {
 	if c.Namespace != "pg" {
 		t.Errorf("namespace = %q, want the release name", c.Namespace)
 	}
-	if c.SlugPrefix != "pg-" || !c.CreateNamespace {
+	if c.SlugPrefix != "" || !c.CreateNamespace {
 		t.Errorf("SlugPrefix = %q, CreateNamespace = %v", c.SlugPrefix, c.CreateNamespace)
 	}
 	if req.SpaceLabels["Variant"] != "base" {

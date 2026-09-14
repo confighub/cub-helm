@@ -12,56 +12,6 @@ import (
 	"github.com/confighub/cub-helm/internal/helmrender"
 )
 
-// helmSourceUnit pairs a source-space unit with its parsed HelmSource document.
-type helmSourceUnit struct {
-	unit   *goclient.Unit
-	source *helmrender.HelmSource
-}
-
-// listHelmSources returns the parsed HelmSource units in the source space.
-// Units that do not parse are skipped with a warning.
-func listHelmSources(sourceSpaceID uuid.UUID) ([]helmSourceUnit, error) {
-	units, err := cub.ListUnits(sourceSpaceID, "")
-	if err != nil {
-		return nil, err
-	}
-	content, err := cub.ListUnitData(sourceSpaceID, "")
-	if err != nil {
-		return nil, err
-	}
-	sources := make([]helmSourceUnit, 0, len(units))
-	for _, u := range units {
-		data, ok := content[u.UnitID]
-		if !ok {
-			continue
-		}
-		src, err := helmrender.ParseHelmSource([]byte(data))
-		if err != nil {
-			tprint("Warning: unit %s in the helm source space is not a valid HelmSource: %v", u.Slug, err)
-			continue
-		}
-		sources = append(sources, helmSourceUnit{unit: u, source: src})
-	}
-	return sources, nil
-}
-
-// checkPrefixConflict enforces that no two HelmSources in a component share a
-// unit prefix. In particular at most one may have an empty prefix.
-func checkPrefixConflict(others []helmSourceUnit, release, prefix string) error {
-	for _, other := range others {
-		if other.unit.Slug == makeSlug(release) {
-			continue
-		}
-		if other.source.Spec.UnitPrefix == prefix {
-			if prefix == "" {
-				return fmt.Errorf("release %q already uses an empty unit prefix in this component; pass --prefix", other.source.Spec.Release.Name)
-			}
-			return fmt.Errorf("release %q already uses unit prefix %q in this component; pass a different --prefix", other.source.Spec.Release.Name, prefix)
-		}
-	}
-	return nil
-}
-
 // applyHelmSource renders the HelmSource and uploads the result into the
 // component's base space, then records the HelmSource in the source space. It
 // is the shared core of install, upgrade, and template. The upload is what
@@ -118,15 +68,14 @@ func applyHelmSource(src *helmrender.HelmSource, component string, dryRun bool) 
 
 // uploadRequest builds the upload of one release's rendered chart. The release
 // owns its Units by name, so releases sharing a component's base never write or
-// empty each other's Units.
+// empty each other's Units. Nothing prefixes their slugs: a Unit is matched by
+// its resource identity rather than its slug, charts give each release's
+// resources their own names, and two that do share a name get distinct slugs
+// from the upload.
 func uploadRequest(src *helmrender.HelmSource, component string, result *helmrender.Result) goclient.UploadRequest {
 	files := make([]goclient.UploadRequestFile, 0, len(result.Files))
 	for _, f := range result.Files {
 		files = append(files, goclient.UploadRequestFile{Path: uploadPath(f.Path), Content: f.Content})
-	}
-	slugPrefix := ""
-	if src.Spec.UnitPrefix != "" {
-		slugPrefix = src.Spec.UnitPrefix + "-"
 	}
 	chart := result.UnitLabels[helmrender.HelmChartLabel]
 	return goclient.UploadRequest{
@@ -141,7 +90,6 @@ func uploadRequest(src *helmrender.HelmSource, component string, result *helmren
 			SourceName:      makeSlug(src.Spec.Release.Name),
 			Namespace:       src.RenderNamespace(),
 			CreateNamespace: src.Spec.CreateNamespace,
-			SlugPrefix:      slugPrefix,
 			Space:           component + baseSpaceSuffix,
 			UnitLabels:      result.UnitLabels,
 		}},

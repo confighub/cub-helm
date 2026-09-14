@@ -40,12 +40,8 @@ type HelmSourceSpec struct {
 	// mirroring helm install --create-namespace. Nothing is synthesized when the
 	// rendered output already contains that Namespace.
 	CreateNamespace bool `json:"createNamespace,omitempty"`
-	// UnitPrefix is prepended, with a "-", to the slugs of the Units this release
-	// creates in the base space, so releases sharing a component sort apart. Empty
-	// is allowed for exactly one HelmSource per source space.
-	UnitPrefix   string `json:"unitPrefix,omitempty"`
-	IncludeHooks bool   `json:"includeHooks,omitempty"`
-	SkipCRDs     bool   `json:"skipCRDs,omitempty"`
+	IncludeHooks    bool `json:"includeHooks,omitempty"`
+	SkipCRDs        bool `json:"skipCRDs,omitempty"`
 	// Values are the fully merged user-supplied values.
 	Values map[string]any `json:"values,omitempty"`
 }

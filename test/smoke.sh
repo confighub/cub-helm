@@ -201,29 +201,24 @@ $cub helm install --component "${COMP}ns" noname "$CHART"
 checkUnitConfigValue "${COMP}ns-base" noname '.metadata.namespace' "noname"
 checkSpaceMetadataValue "${COMP}ns-base" '.Space.Labels.Namespace' "noname"
 
-### Second release in the same component, with a unit prefix
-echo "Test 3: a second release adds prefixed units to the same component"
+### Second release in the same component
+echo "Test 3: a second release adds its own units to the same component"
 $cub helm install \
   --component "$COMP" \
   --namespace smoke \
-  --prefix pg \
   pg \
   "$CHART"
 
-verifyEntityExists "$BASE" unit pg-pg
-verifyEntityExists "$BASE" unit pg-pg-service
+# The chart names its resources after the release, so pg's units are named pg.
+verifyEntityExists "$BASE" unit pg
+verifyEntityExists "$BASE" unit pg-service
 verifyEntityExists "$SOURCE" unit pg
+# Both releases ship the same CRD; the second gets its own unit rather than
+# taking the first's.
+checkUnitMetadataValue "$BASE" widgets.example.com-crd '.Unit.Labels.UploadSource' "web"
+checkUnitMetadataValue "$BASE" widgets.example.com-crd-2 '.Unit.Labels.UploadSource' "pg"
 # Each release owns its own units, so installing pg left web's alone.
-checkUnitMetadataValue "$BASE" pg-pg '.Unit.Labels.UploadSource' "pg"
+checkUnitMetadataValue "$BASE" pg '.Unit.Labels.UploadSource' "pg"
 checkUnitConfigValue "$BASE" web '.spec.replicas' "3"
-
-### Empty prefix may be used by at most one release in a component
-echo "Test 4: a second empty-prefix release is rejected"
-OUTPUT=$($cub helm install \
-  --component "$COMP" \
-  --prefix "" \
-  dup \
-  "$CHART" 2>&1 || true)
-expectError "$OUTPUT" "already uses an empty unit prefix"
 
 echo "cub helm smoke test passed"

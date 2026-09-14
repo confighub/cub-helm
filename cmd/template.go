@@ -30,7 +30,7 @@ Examples:
 		SilenceErrors: true,
 		PreRunE:       ensureClient,
 		RunE: func(cmd *cobra.Command, positional []string) error {
-			return runInstall(cmd, &args, positional[0], positional[1], true)
+			return runInstall(&args, positional[0], positional[1], true)
 		},
 	}
 

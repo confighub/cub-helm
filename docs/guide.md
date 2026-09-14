@@ -157,15 +157,15 @@ cub unit diff backend --space cubbychat-base --from 1
 
 ## Multiple charts in one component
 
-A component can be built from more than one chart. Install additional releases into the same component with `--component`, and give each a `--prefix` so their unit names sort apart:
+A component can be built from more than one chart. Install additional releases into the same component with `--component`:
 
 ```bash
 cub helm install cubbychat oci://ghcr.io/confighub/charts/cubbychat
-cub helm install --component cubbychat --namespace cubbychat --prefix pg \
+cub helm install --component cubbychat --namespace cubbychat \
     pg oci://registry-1.docker.io/bitnamicharts/postgresql
 ```
 
-The second release's new units are prefixed (`pg-pg-postgresql`, …). One release per component may use an empty prefix; the rest must be prefixed. Each release owns the units it wrote, so upgrading one release never updates or empties another's.
+Each release's units are named from its own resources, which charts usually name after the release (`pg-postgresql`). When two releases do render a resource with the same name, such as a CRD both charts ship, the later one's unit gets a numbered slug. Both units define the same object, so decide which release should own it. Each release owns the units it wrote, so upgrading one release never updates or empties another's.
 
 ## Preview without installing
 
