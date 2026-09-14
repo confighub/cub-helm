@@ -203,11 +203,12 @@ checkSpaceMetadataValue "${COMP}ns-base" '.Space.Labels.Namespace' "noname"
 
 ### Second release in the same component
 echo "Test 3: a second release adds its own units to the same component"
-$cub helm install \
+OUTPUT=$($cub helm install \
   --component "$COMP" \
   --namespace smoke \
   pg \
-  "$CHART"
+  "$CHART")
+echo "$OUTPUT"
 
 # The chart names its resources after the release, so pg's units are named pg.
 verifyEntityExists "$BASE" unit pg
@@ -217,6 +218,8 @@ verifyEntityExists "$SOURCE" unit pg
 # taking the first's.
 checkUnitMetadataValue "$BASE" widgets.example.com-crd '.Unit.Labels.UploadSource' "web"
 checkUnitMetadataValue "$BASE" widgets.example.com-crd-2 '.Unit.Labels.UploadSource' "pg"
+# ...and the install warns that both units define it.
+expectError "$OUTPUT" "widgets.example.com-crd-2 (apiextensions.k8s.io/CustomResourceDefinition//widgets.example.com): also $BASE/widgets.example.com-crd"
 # Each release owns its own units, so installing pg left web's alone.
 checkUnitMetadataValue "$BASE" pg '.Unit.Labels.UploadSource' "pg"
 checkUnitConfigValue "$BASE" web '.spec.replicas' "3"

@@ -189,6 +189,17 @@ func reportUpload(result *goclient.UploadResult) {
 					tprint("  linked    %s -> %s (%s)", l.FromUnit, l.ToUnit, l.Reason)
 				}
 			}
+			if len(s.Duplicates) > 0 {
+				tprint("Warning: these resources are also defined by other units deployed to the same place,")
+				tprint("which would fight over them. Decide which release owns each one:")
+				for _, d := range s.Duplicates {
+					others := make([]string, 0, len(d.Others))
+					for _, o := range d.Others {
+						others = append(others, o.SpaceSlug+"/"+o.UnitSlug)
+					}
+					tprint("  - %s (%s): also %s", d.Slug, d.Resource, strings.Join(others, ", "))
+				}
+			}
 		}
 		if c.NamespaceCollision != nil {
 			tprint("Note: --create-namespace was given, but the chart already renders Namespace %q, so none was synthesized.",
