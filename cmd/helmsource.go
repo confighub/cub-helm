@@ -1,22 +1,21 @@
 package cmd
 
 import (
-	"errors"
 	"fmt"
-	"maps"
+	"path"
 	"strings"
-	"time"
 
 	"github.com/google/uuid"
 
-	"github.com/confighub/sdk/bridge-impl/helmutils"
 	goclient "github.com/confighub/sdk/core/openapi/goclient-new"
+
+	"github.com/confighub/cub-helm/internal/helmrender"
 )
 
 // helmSourceUnit pairs a source-space unit with its parsed HelmSource document.
 type helmSourceUnit struct {
 	unit   *goclient.Unit
-	source *helmutils.HelmSource
+	source *helmrender.HelmSource
 }
 
 // listHelmSources returns the parsed HelmSource units in the source space.
@@ -36,7 +35,7 @@ func listHelmSources(sourceSpaceID uuid.UUID) ([]helmSourceUnit, error) {
 		if !ok {
 			continue
 		}
-		src, err := helmutils.ParseHelmSource([]byte(data))
+		src, err := helmrender.ParseHelmSource([]byte(data))
 		if err != nil {
 			tprint("Warning: unit %s in the helm source space is not a valid HelmSource: %v", u.Slug, err)
 			continue
@@ -63,16 +62,18 @@ func checkPrefixConflict(others []helmSourceUnit, release, prefix string) error 
 	return nil
 }
 
-// applyHelmSource renders the HelmSource and reconciles both the source unit
-// and the generated units in the base space. It is the shared core of install
-// and upgrade.
-func applyHelmSource(src *helmutils.HelmSource, component string, spaces *helmComponentSpaces) error {
-	chrt, err := helmutils.LoadChart(src)
+// applyHelmSource renders the HelmSource and uploads the result into the
+// component's base space, then records the HelmSource in the source space. It
+// is the shared core of install, upgrade, and template. The upload is what
+// decides which Units to create, merge, or empty; with dryRun it only reports
+// that, and nothing is written.
+func applyHelmSource(src *helmrender.HelmSource, component string, dryRun bool) error {
+	chrt, err := helmrender.LoadChart(src)
 	if err != nil {
 		return err
 	}
 
-	result, err := helmutils.Generate(chrt, src, component)
+	result, err := helmrender.Render(chrt, src)
 	if err != nil {
 		return err
 	}
@@ -83,41 +84,194 @@ func applyHelmSource(src *helmutils.HelmSource, component string, spaces *helmCo
 	if len(result.SkippedCRDFiles) > 0 {
 		tprint("Skipped %d CRD file(s) due to --skip-crds", len(result.SkippedCRDFiles))
 	}
-	if src.Spec.IncludeHooks && chartDeclaresHooks(result) {
+	if src.Spec.IncludeHooks && renderedHooks(result) {
 		tprint("Note: hook manifests are included as plain resources; Helm hook lifecycle (weights, deletion policies) does not apply")
 	}
 
 	src.Status.ResolvedVersion = result.ResolvedVersion
 	src.Status.AppVersion = result.AppVersion
 
-	if err := upsertHelmSourceUnit(spaces.source.SpaceID, src, result.UnitLabels); err != nil {
-		return err
+	uploaded, err := cub.Upload(uploadRequest(src, component, result), dryRun)
+	if err != nil {
+		return fmt.Errorf("failed to upload release %q: %w", src.Spec.Release.Name, err)
+	}
+	reportUpload(uploaded)
+	if dryRun {
+		return nil
 	}
 
-	return reconcileHelmUnits(spaces.base.SpaceID, src, result)
+	baseSpaceID, err := uploadedSpaceID(uploaded)
+	if err != nil {
+		return err
+	}
+	sourceSpace, err := ensureSourceSpace(component, baseSpaceID)
+	if err != nil {
+		return err
+	}
+	// The HelmSource records what was rendered even when some writes failed: the
+	// ones that landed are real, and upgrade re-renders from it to finish the rest.
+	if err := upsertHelmSourceUnit(sourceSpace.SpaceID, src, result.UnitLabels); err != nil {
+		return err
+	}
+	return uploadFailures(uploaded)
 }
 
-// chartDeclaresHooks reports whether the render produced any hook manifests.
-// When hooks are included they are not in DroppedHooks, so detect them by
-// scanning the generated content for the annotation.
-func chartDeclaresHooks(result *helmutils.GenerateResult) bool {
+// uploadRequest builds the upload of one release's rendered chart. The release
+// owns its Units by name, so releases sharing a component's base never write or
+// empty each other's Units.
+func uploadRequest(src *helmrender.HelmSource, component string, result *helmrender.Result) goclient.UploadRequest {
+	files := make([]goclient.UploadRequestFile, 0, len(result.Files))
+	for _, f := range result.Files {
+		files = append(files, goclient.UploadRequestFile{Path: uploadPath(f.Path), Content: f.Content})
+	}
+	slugPrefix := ""
+	if src.Spec.UnitPrefix != "" {
+		slugPrefix = src.Spec.UnitPrefix + "-"
+	}
+	chart := result.UnitLabels[helmrender.HelmChartLabel]
+	return goclient.UploadRequest{
+		Files: files,
+		Source: &goclient.UploadSourceInfo{
+			Ref:           src.Spec.Chart.Ref,
+			Client:        "cub-helm",
+			ClientVersion: version,
+		},
+		Components: []goclient.UploadComponentRequest{{
+			Name:            component,
+			SourceName:      makeSlug(src.Spec.Release.Name),
+			Namespace:       src.RenderNamespace(),
+			CreateNamespace: src.Spec.CreateNamespace,
+			SlugPrefix:      slugPrefix,
+			Space:           component + baseSpaceSuffix,
+			UnitLabels:      result.UnitLabels,
+		}},
+		SpaceLabels:       map[string]string{"Variant": variantLabelBase},
+		ChangeDescription: fmt.Sprintf("Rendered chart %s %s for Helm release %s", chart, result.ResolvedVersion, src.Spec.Release.Name),
+	}
+}
+
+// uploadPath names a rendered template in the upload. The server reads only
+// YAML and JSON files, so a template with another extension is sent with .yaml
+// appended; its "# Source:" comment still records the template's own path.
+func uploadPath(templatePath string) string {
+	switch strings.ToLower(path.Ext(templatePath)) {
+	case ".yaml", ".yml", ".json":
+		return templatePath
+	}
+	return templatePath + ".yaml"
+}
+
+// renderedHooks reports whether the render produced any hook manifests. When
+// hooks are included they are not in DroppedHooks, so detect them by scanning
+// the rendered content for the annotation.
+func renderedHooks(result *helmrender.Result) bool {
 	if len(result.DroppedHooks) > 0 {
 		return true
 	}
-	for _, u := range result.Units {
-		if containsHelmHookAnnotation(u.Content) {
+	for _, f := range result.Files {
+		if strings.Contains(f.Content, "helm.sh/hook:") || strings.Contains(f.Content, `"helm.sh/hook"`) {
 			return true
 		}
 	}
 	return false
 }
 
-func containsHelmHookAnnotation(content string) bool {
-	return strings.Contains(content, "helm.sh/hook:") || strings.Contains(content, `"helm.sh/hook"`)
+// uploadedSpaceID returns the base space the upload wrote to.
+func uploadedSpaceID(result *goclient.UploadResult) (uuid.UUID, error) {
+	for _, c := range result.Components {
+		for _, s := range c.Spaces {
+			if s.SpaceID != nil {
+				return *s.SpaceID, nil
+			}
+		}
+	}
+	return uuid.UUID{}, fmt.Errorf("the upload reported no base space")
+}
+
+// uploadFailures returns an error naming the Unit and Link writes that failed.
+func uploadFailures(result *goclient.UploadResult) error {
+	var failed []string
+	for _, c := range result.Components {
+		for _, s := range c.Spaces {
+			for _, u := range s.Units {
+				if u.Error != nil {
+					failed = append(failed, "unit "+u.Slug)
+				}
+			}
+			for _, l := range s.Links {
+				if l.Error != nil {
+					failed = append(failed, fmt.Sprintf("link %s -> %s", l.FromUnit, l.ToUnit))
+				}
+			}
+		}
+	}
+	if len(failed) == 0 {
+		return nil
+	}
+	return fmt.Errorf("%d write(s) failed: %s; run 'cub helm upgrade' to retry", len(failed), strings.Join(failed, ", "))
+}
+
+// reportUpload prints what the upload did, or would do.
+func reportUpload(result *goclient.UploadResult) {
+	if result.DryRun {
+		tprint("Dry run: nothing was written.")
+	}
+	for _, c := range result.Components {
+		for _, s := range c.Spaces {
+			tprint("Space %s (%s)", s.SpaceSlug, s.Action)
+			unchanged := 0
+			for _, u := range s.Units {
+				switch {
+				case u.Error != nil:
+					tprint("  %-9s %s: %s", "FAILED", u.Slug, errString(u.Error))
+				case u.Action == "Unchanged":
+					unchanged++
+				case !quiet:
+					tprint("  %-9s %s", u.Action, u.Slug)
+				}
+			}
+			if unchanged > 0 && !quiet {
+				tprint("  %-9s %d Unit(s)", "Unchanged", unchanged)
+			}
+			for _, l := range s.Links {
+				switch {
+				case l.Error != nil:
+					tprint("  link FAILED %s -> %s: %s", l.FromUnit, l.ToUnit, errString(l.Error))
+				case l.Action == "Create" && !quiet:
+					tprint("  linked    %s -> %s (%s)", l.FromUnit, l.ToUnit, l.Reason)
+				}
+			}
+		}
+		if c.NamespaceCollision != nil {
+			tprint("Note: --create-namespace was given, but the chart already renders Namespace %q, so none was synthesized.",
+				c.NamespaceCollision.Namespace)
+		}
+		if len(c.SkippedSecrets) > 0 {
+			tprint("Note: %d Secret(s) were NOT uploaded. Apply them out-of-band:", len(c.SkippedSecrets))
+			for _, s := range c.SkippedSecrets {
+				tprint("  - %s", s)
+			}
+		}
+		if len(c.UnmatchedReferences) > 0 && !quiet {
+			tprint("Note: these references didn't resolve to any resource in the chart (expected when the")
+			tprint("resource is created elsewhere, such as a namespace or a Secret):")
+			for _, u := range c.UnmatchedReferences {
+				tprint("  - %s -> %s %q", u.FromUnit, u.TargetType, u.TargetName)
+			}
+		}
+	}
+}
+
+// errString renders a per-item error from the upload response.
+func errString(e *goclient.ResponseError) string {
+	if e == nil || e.Message == "" {
+		return "unknown error"
+	}
+	return e.Message
 }
 
 // upsertHelmSourceUnit creates or updates the HelmSource unit in the source space.
-func upsertHelmSourceUnit(sourceSpaceID uuid.UUID, src *helmutils.HelmSource, labels map[string]string) error {
+func upsertHelmSourceUnit(sourceSpaceID uuid.UUID, src *helmrender.HelmSource, labels map[string]string) error {
 	data, err := src.Marshal()
 	if err != nil {
 		return err
@@ -129,15 +283,29 @@ func upsertHelmSourceUnit(sourceSpaceID uuid.UUID, src *helmutils.HelmSource, la
 		return err
 	}
 	if existing == nil {
-		if _, err := createUnitInSpace(sourceSpaceID, slug, toolchainConfigHubYAML, string(data), labels); err != nil {
+		created, err := cub.CreateUnit(sourceSpaceID, goclient.Unit{
+			SpaceID:       sourceSpaceID,
+			Slug:          slug,
+			ToolchainType: toolchainConfigHubYAML,
+			Labels:        labels,
+		})
+		if err != nil {
 			return fmt.Errorf("failed to create HelmSource unit %q: %w", slug, err)
+		}
+		if _, err := cub.PutUnitData(sourceSpaceID, created.UnitID, string(data)); err != nil {
+			return fmt.Errorf("failed to write HelmSource unit %q: %w", slug, err)
 		}
 		tprint("Created HelmSource unit %s", slug)
 		return nil
 	}
 
 	if !labelsMatch(existing.Labels, labels) {
-		mergeLabels(existing, labels)
+		if existing.Labels == nil {
+			existing.Labels = map[string]string{}
+		}
+		for k, v := range labels {
+			existing.Labels[k] = v
+		}
 		if _, err := cub.UpdateUnit(existing.SpaceID, existing); err != nil {
 			return fmt.Errorf("failed to update HelmSource unit %q: %w", slug, err)
 		}
@@ -150,119 +318,6 @@ func upsertHelmSourceUnit(sourceSpaceID uuid.UUID, src *helmutils.HelmSource, la
 	return nil
 }
 
-// reconcileHelmUnits makes the base space's units for this release match the
-// generated set: changed units are updated, new ones created, and units whose
-// source file disappeared are deleted.
-func reconcileHelmUnits(baseSpaceID uuid.UUID, src *helmutils.HelmSource, result *helmutils.GenerateResult) error {
-	release := src.Spec.Release.Name
-	where := fmt.Sprintf("Labels.%s = '%s'", helmutils.HelmReleaseLabel, release)
-	existing, err := cub.ListUnits(baseSpaceID, where)
-	if err != nil {
-		return err
-	}
-	existingData, err := cub.ListUnitData(baseSpaceID, where)
-	if err != nil {
-		return err
-	}
-	existingBySlug := map[string]*goclient.Unit{}
-	for _, u := range existing {
-		existingBySlug[u.Slug] = u
-	}
-
-	desired := map[string]bool{}
-	for _, gen := range result.Units {
-		desired[gen.Slug] = true
-		if ex, ok := existingBySlug[gen.Slug]; ok {
-			contentMatches := existingData[ex.UnitID] == gen.Content
-			if contentMatches && labelsMatch(ex.Labels, result.UnitLabels) {
-				continue
-			}
-			updated := ex
-			if !labelsMatch(ex.Labels, result.UnitLabels) {
-				mergeLabels(ex, result.UnitLabels)
-				if updated, err = cub.UpdateUnit(ex.SpaceID, ex); err != nil {
-					return fmt.Errorf("failed to update unit %q: %w", gen.Slug, err)
-				}
-			}
-			if !contentMatches {
-				if updated, err = cub.PutUnitData(ex.SpaceID, ex.UnitID, gen.Content); err != nil {
-					return fmt.Errorf("failed to update unit %q: %w", gen.Slug, err)
-				}
-			}
-			if wait {
-				if err := awaitTriggersRemoval(updated); err != nil {
-					return err
-				}
-			}
-			reportUnitUpdated(updated.Slug, updated.UnitID.String())
-			continue
-		}
-
-		// A synthesized Namespace unit (Source == "") may already exist,
-		// created by another release sharing the namespace; leave it alone.
-		if gen.Source == "" {
-			other, err := cub.UnitBySlug(baseSpaceID, gen.Slug)
-			if err != nil {
-				return err
-			}
-			if other != nil {
-				if !quiet {
-					tprint("Namespace unit %s already exists (shared); leaving it unchanged", gen.Slug)
-				}
-				continue
-			}
-		}
-
-		created, err := createUnitInSpace(baseSpaceID, gen.Slug, toolchainKubernetesYAML, gen.Content, result.UnitLabels)
-		if err != nil {
-			return fmt.Errorf("failed to create unit %q: %w", gen.Slug, err)
-		}
-		if wait {
-			if err := awaitTriggersRemoval(created); err != nil {
-				return err
-			}
-		}
-		reportUnitCreated(created.Slug, created.UnitID.String())
-	}
-
-	for slug, ex := range existingBySlug {
-		if desired[slug] {
-			continue
-		}
-		if err := cub.DeleteUnit(baseSpaceID, ex.UnitID); err != nil {
-			return fmt.Errorf("failed to delete unit %q (its source file was removed from the chart): %w", slug, err)
-		}
-		tprint("Deleted unit %s (its source file was removed from the chart)", slug)
-	}
-
-	return nil
-}
-
-// createUnitInSpace creates a unit with the given content and labels. The
-// server keeps configuration apart from the unit, so this is a create followed
-// by a data write. If the write fails the empty unit is left in place: it
-// exists, and the caller can write to it again.
-func createUnitInSpace(spaceID uuid.UUID, slug, toolchainType, content string, labels map[string]string) (*goclient.Unit, error) {
-	created, err := cub.CreateUnit(spaceID, goclient.Unit{
-		SpaceID:       spaceID,
-		Slug:          slug,
-		ToolchainType: toolchainType,
-		Labels:        labels,
-	})
-	if err != nil {
-		return nil, err
-	}
-	return cub.PutUnitData(spaceID, created.UnitID, content)
-}
-
-// mergeLabels sets the given labels on the unit, preserving unrelated ones.
-func mergeLabels(unit *goclient.Unit, labels map[string]string) {
-	if unit.Labels == nil {
-		unit.Labels = map[string]string{}
-	}
-	maps.Copy(unit.Labels, labels)
-}
-
 // labelsMatch reports whether every wanted label is present with the same value.
 func labelsMatch(have, want map[string]string) bool {
 	for k, v := range want {
@@ -271,53 +326,4 @@ func labelsMatch(have, want map[string]string) bool {
 		}
 	}
 	return true
-}
-
-// reportUnitCreated / reportUnitUpdated print a quiet-aware confirmation line.
-func reportUnitCreated(slug, id string) {
-	if !quiet {
-		tprint("Successfully created unit %s (%s)", slug, id)
-	}
-}
-
-func reportUnitUpdated(slug, id string) {
-	if !quiet {
-		tprint("Successfully updated unit %s (%s)", slug, id)
-	}
-}
-
-// awaitTriggersRemoval polls the unit until its awaiting/triggers apply gate
-// clears, mirroring the cub CLI's --wait behavior for unit writes.
-func awaitTriggersRemoval(unitDetails *goclient.Unit) error {
-	var err error
-	unitID := unitDetails.UnitID
-	tries := 0
-	numTries := 100
-	ms := 25
-	maxMs := 250
-	done := false
-	for tries < numTries {
-		if unitDetails.ApplyGates == nil {
-			done = true
-			break
-		}
-		if _, awaitingTriggers := unitDetails.ApplyGates["awaiting/triggers"]; !awaitingTriggers {
-			done = true
-			break
-		}
-		time.Sleep(time.Duration(ms) * time.Millisecond)
-		ms *= 2
-		if ms > maxMs {
-			ms = maxMs
-		}
-		tries++
-		unitDetails, err = cub.GetUnit(unitDetails.SpaceID, unitID)
-		if err != nil {
-			return err
-		}
-	}
-	if !done {
-		return errors.New("triggers didn't execute on unit " + unitDetails.Slug)
-	}
-	return nil
 }

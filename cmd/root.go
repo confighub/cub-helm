@@ -20,15 +20,12 @@ var (
 // Version returns the plugin version (set via ldflags at build time).
 func Version() string { return version }
 
-// cub is the ConfigHub API client, initialized by the helm command's
-// PersistentPreRunE for every subcommand except template (which is offline).
+// cub is the ConfigHub API client, initialized by ensureClient before each
+// subcommand that talks to the server.
 var cub *cubclient.Client
 
-// Shared flags across the write subcommands.
-var (
-	quiet bool
-	wait  bool
-)
+// quiet suppresses per-unit output on the subcommands that upload.
+var quiet bool
 
 // NewRootCmd builds the helm command tree. The plugin contributes the single
 // top-level command "helm"; cub invokes this binary with the subcommand as the
@@ -39,8 +36,8 @@ func NewRootCmd() *cobra.Command {
 		Short: "Install Helm charts as ConfigHub components",
 		Long: `Install Helm charts as ConfigHub components.
 
-A chart is rendered entirely client-side and its output becomes units in the
-component's base variant space (<component>-base). The chart reference, values,
+A chart is rendered entirely client-side and its output is uploaded into the
+component's base variant space (<component>-base), one unit per resource. The chart reference, values,
 and options are recorded as a HelmSource unit in the component's helm source
 space (<component>-helm), which is the source of truth for upgrades.
 
@@ -68,7 +65,7 @@ func Execute() {
 // ensureClient initializes the shared ConfigHub client. It is used as the
 // PersistentPreRunE for subcommands that talk to the server.
 func ensureClient(cmd *cobra.Command, _ []string) error {
-	c, err := cubclient.New(context.Background())
+	c, err := cubclient.New(context.Background(), "cub-helm/"+version)
 	if err != nil {
 		return err
 	}

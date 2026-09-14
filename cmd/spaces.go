@@ -20,88 +20,54 @@ const (
 	variantLabelBase      = "base"
 	variantLabelHelm      = "helm-source"
 
-	toolchainKubernetesYAML = "Kubernetes/YAML"
-	toolchainConfigHubYAML  = "ConfigHub/YAML"
+	toolchainConfigHubYAML = "ConfigHub/YAML"
 )
 
-// helmComponentSpaces holds the two spaces of a helm-installed component.
-type helmComponentSpaces struct {
-	source *goclient.Space
-	base   *goclient.Space
-}
-
-// createHelmSpace creates a space with the given metadata.
-func createHelmSpace(slug string, labels, annotations map[string]string) (*goclient.Space, error) {
-	created, err := cub.CreateSpace(goclient.Space{
-		Slug:        slug,
-		Labels:      labels,
-		Annotations: annotations,
-	})
-	if err != nil {
-		return nil, err
-	}
-	tprint("Created space %s", slug)
-	return created, nil
-}
-
-// ensureComponentSpaces gets or creates the component's base variant space and
-// helm source space, stamping the component labels and the generator annotation.
-func ensureComponentSpaces(component string) (*helmComponentSpaces, error) {
-	baseSlug := component + baseSpaceSuffix
+// ensureSourceSpace gets or creates the component's helm source space, and
+// points its generator annotation at the base space the upload wrote. The base
+// itself is created by the upload.
+func ensureSourceSpace(component string, baseSpaceID uuid.UUID) (*goclient.Space, error) {
 	sourceSlug := component + helmSourceSpaceSuffix
-
-	base, err := cub.SpaceBySlug(baseSlug)
-	if err != nil {
-		return nil, err
-	}
-	if base == nil {
-		base, err = createHelmSpace(baseSlug, map[string]string{
-			"Component": component,
-			"Variant":   variantLabelBase,
-		}, nil)
-		if err != nil {
-			return nil, err
-		}
-	}
-
 	source, err := cub.SpaceBySlug(sourceSlug)
 	if err != nil {
 		return nil, err
 	}
 	if source == nil {
-		source, err = createHelmSpace(sourceSlug, map[string]string{
-			"Component": component,
-			"Variant":   variantLabelHelm,
-		}, map[string]string{
-			AnnotationGeneratesSpaceID: base.SpaceID.String(),
+		source, err = cub.CreateSpace(goclient.Space{
+			Slug: sourceSlug,
+			Labels: map[string]string{
+				"Component": component,
+				"Variant":   variantLabelHelm,
+			},
+			Annotations: map[string]string{
+				AnnotationGeneratesSpaceID: baseSpaceID.String(),
+			},
 		})
 		if err != nil {
 			return nil, err
 		}
-	} else if source.Annotations[AnnotationGeneratesSpaceID] != base.SpaceID.String() {
-		if err := patchHelmSpaceGeneratesAnnotation(source.SpaceID, base.SpaceID); err != nil {
+		tprint("Created space %s", sourceSlug)
+		return source, nil
+	}
+	if source.Annotations[AnnotationGeneratesSpaceID] != baseSpaceID.String() {
+		if err := patchHelmSpaceGeneratesAnnotation(source.SpaceID, baseSpaceID); err != nil {
 			return nil, err
 		}
 	}
-
-	return &helmComponentSpaces{source: source, base: base}, nil
+	return source, nil
 }
 
-// getComponentSpaces returns the component's spaces without creating anything,
-// for commands that require a prior install.
-func getComponentSpaces(component string) (*helmComponentSpaces, error) {
-	base, err := cub.SpaceBySlug(component + baseSpaceSuffix)
-	if err != nil {
-		return nil, err
-	}
+// getSourceSpace returns the component's helm source space, requiring a prior
+// install.
+func getSourceSpace(component string) (*goclient.Space, error) {
 	source, err := cub.SpaceBySlug(component + helmSourceSpaceSuffix)
 	if err != nil {
 		return nil, err
 	}
-	if source == nil || base == nil {
+	if source == nil {
 		return nil, fmt.Errorf("component %q has no helm source space; run 'cub helm install' first (or pass --component)", component)
 	}
-	return &helmComponentSpaces{source: source, base: base}, nil
+	return source, nil
 }
 
 // patchHelmSpaceGeneratesAnnotation sets the GeneratesSpaceID annotation on the

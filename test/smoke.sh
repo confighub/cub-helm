@@ -5,12 +5,14 @@ set -e
 #
 # `cub helm install` renders a chart client-side and installs it as a component:
 #   - a helm source space  <component>-helm  holding one HelmSource unit per release
-#   - a base variant space <component>-base  holding one unit per chart template file
+#   - a base variant space <component>-base  holding one unit per rendered resource,
+#     written by uploading the rendered chart
 # The source space is annotated with GeneratesSpaceID pointing at the base space.
-# `cub helm upgrade` patches the HelmSource and reconciles the base units.
+# `cub helm upgrade` patches the HelmSource and uploads the re-rendered chart, which
+# merges changed resources and empties the units of resources no longer rendered.
 #
 # Uses a local chart fixture (test/testdata/smoke) so it needs no Helm
-# repositories and no cluster: install/upgrade only create and update units.
+# repositories and no cluster: install/upgrade only write units.
 #
 # Prerequisites:
 #   - a running ConfigHub server, with the current cub context pointing at it
@@ -42,7 +44,7 @@ function verifyEntityExists {
     local space="$1" entityType="$2" entityName="$3"
     local spaceFlag=""
     [[ -n "$space" ]] && spaceFlag="--space $space"
-    if ! $cub "$entityType" list $spaceFlag --no-headers -o name | grep -q "$entityName" ; then
+    if ! $cub "$entityType" list $spaceFlag --no-headers -o name | grep -qxE "([^/]*/)?$entityName" ; then
         echo "$entityName of type $entityType not found in list" >&2
         exit 1
     fi
@@ -52,7 +54,7 @@ function verifyEntityDoesNotExist {
     local space="$1" entityType="$2" entityName="$3"
     local spaceFlag=""
     [[ -n "$space" ]] && spaceFlag="--space $space"
-    if $cub "$entityType" list $spaceFlag --no-headers -o name | grep -q "$entityName" ; then
+    if $cub "$entityType" list $spaceFlag --no-headers -o name | grep -qxE "([^/]*/)?$entityName" ; then
         echo "$entityName of type $entityType unexpectedly found in list" >&2
         exit 1
     fi
@@ -78,6 +80,26 @@ function checkUnitConfigValue {
     fi
 }
 
+function checkUnitMetadataValue {
+    local space="$1" unit="$2" field="$3" value="$4"
+    local result
+    result=$($cub unit get --space "$space" -o jq="$field" "$unit")
+    if [[ "$result" != "$value" ]] ; then
+        echo "unit $unit $field: $result != $value" >&2
+        exit 1
+    fi
+}
+
+function checkUnitDataEmpty {
+    local space="$1" unit="$2"
+    local result
+    result=$($cub unit data --space "$space" "$unit")
+    if [[ -n "$result" ]] ; then
+        echo "unit $unit is not empty: $result" >&2
+        exit 1
+    fi
+}
+
 function expectError {
     local output="$1" expected_msg="$2"
     if ! echo -n "$output" | grep -zq "$expected_msg"; then
@@ -97,6 +119,8 @@ SOURCE="$COMP-helm"
 function helmCleanup {
     $cub space delete --recursive "$BASE" || true
     $cub space delete --recursive "$SOURCE" || true
+    $cub space delete --recursive "${COMP}ns-base" || true
+    $cub space delete --recursive "${COMP}ns-helm" || true
 }
 if [[ -z "$NOCLEANUP" ]] ; then
     trap helmCleanup SIGINT SIGTERM SIGHUP EXIT
@@ -124,22 +148,28 @@ checkSpaceMetadataValue "$SOURCE" '.Space.Labels.Variant' "helm-source"
 baseID=$($cub space get "$BASE" -o jq='.Space.SpaceID')
 checkSpaceMetadataValue "$SOURCE" '.Space.Annotations.GeneratesSpaceID' "$baseID"
 
-# One unit per template file, named from the chart's file layout.
-verifyEntityExists "$BASE" unit deployment
-verifyEntityExists "$BASE" unit service
-verifyEntityExists "$BASE" unit crds-widget
-verifyEntityExists "$BASE" unit extra-configmap
-verifyEntityExists "$BASE" unit smoke-ns
+# One unit per resource: a workload is named after itself, anything else after
+# its name and kind. Each records the chart template it came from.
+verifyEntityExists "$BASE" unit web
+verifyEntityExists "$BASE" unit web-service
+verifyEntityExists "$BASE" unit web-extra-configmap
+verifyEntityExists "$BASE" unit widgets.example.com-crd
+verifyEntityExists "$BASE" unit namespace
+checkUnitMetadataValue "$BASE" web '.Unit.Annotations.UploadFile' "smoke/templates/deployment.yaml"
+checkUnitMetadataValue "$BASE" widgets.example.com-crd '.Unit.Annotations.UploadFile' "smoke/crds/widget.yaml"
+checkUnitMetadataValue "$BASE" web '.Unit.Labels.UploadSource' "web"
+checkUnitMetadataValue "$BASE" web '.Unit.Labels.HelmChart' "smoke"
+checkSpaceMetadataValue "$BASE" '.Space.Labels.Namespace' "smoke"
 
 # Hook manifests are dropped by default, so no unit is generated from hook.yaml.
-verifyEntityDoesNotExist "$BASE" unit hook
+verifyEntityDoesNotExist "$BASE" unit web-hook
 
 # The HelmSource unit lives in the source space.
 verifyEntityExists "$SOURCE" unit web
 
 # Values and the specified namespace are rendered into the base units.
-checkUnitConfigValue "$BASE" deployment '.spec.replicas' "2"
-checkUnitConfigValue "$BASE" deployment '.metadata.namespace' "smoke"
+checkUnitConfigValue "$BASE" web '.spec.replicas' "2"
+checkUnitConfigValue "$BASE" web '.metadata.namespace' "smoke"
 
 ### Upgrade
 echo "Test 2: upgrade changes values and reconciles the base units"
@@ -152,11 +182,24 @@ $cub helm upgrade \
   web
 
 # The changed value flows into the existing unit.
-checkUnitConfigValue "$BASE" deployment '.spec.replicas' "3"
+checkUnitConfigValue "$BASE" web '.spec.replicas' "3"
 
 # extra.enabled=false makes extra-configmap.yaml render empty, so its unit is
-# deleted by reconciliation.
-verifyEntityDoesNotExist "$BASE" unit extra-configmap
+# emptied: it keeps its history, and returns if the resource does.
+verifyEntityExists "$BASE" unit web-extra-configmap
+checkUnitDataEmpty "$BASE" web-extra-configmap
+
+### A dry run writes nothing
+echo "Test 2b: upgrade --dry-run reports the plan and writes nothing"
+OUTPUT=$($cub helm upgrade --component "$COMP" --dry-run --set replicas=4 web)
+expectError "$OUTPUT" "Update    web"
+checkUnitConfigValue "$BASE" web '.spec.replicas' "3"
+
+### Without --namespace the release name is the namespace
+echo "Test 2c: the release namespace defaults to the release name"
+$cub helm install --component "${COMP}ns" noname "$CHART"
+checkUnitConfigValue "${COMP}ns-base" noname '.metadata.namespace' "noname"
+checkSpaceMetadataValue "${COMP}ns-base" '.Space.Labels.Namespace' "noname"
 
 ### Second release in the same component, with a unit prefix
 echo "Test 3: a second release adds prefixed units to the same component"
@@ -167,9 +210,12 @@ $cub helm install \
   pg \
   "$CHART"
 
-verifyEntityExists "$BASE" unit pg-deployment
-verifyEntityExists "$BASE" unit pg-service
+verifyEntityExists "$BASE" unit pg-pg
+verifyEntityExists "$BASE" unit pg-pg-service
 verifyEntityExists "$SOURCE" unit pg
+# Each release owns its own units, so installing pg left web's alone.
+checkUnitMetadataValue "$BASE" pg-pg '.Unit.Labels.UploadSource' "pg"
+checkUnitConfigValue "$BASE" web '.spec.replicas' "3"
 
 ### Empty prefix may be used by at most one release in a component
 echo "Test 4: a second empty-prefix release is rejected"

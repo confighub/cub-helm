@@ -3,22 +3,26 @@ package cmd
 import (
 	"github.com/spf13/cobra"
 
-	"github.com/confighub/sdk/bridge-impl/helmutils"
+	"github.com/confighub/cub-helm/internal/helmrender"
 )
 
+// installArgs are the flags install and template share.
+type installArgs struct {
+	component       string
+	prefix          string
+	namespace       string
+	createNamespace bool
+	valuesFiles     []string
+	set             []string
+	version         string
+	repo            string
+	includeHooks    bool
+	skipCRDs        bool
+	dryRun          bool
+}
+
 func newInstallCmd() *cobra.Command {
-	var args struct {
-		component       string
-		prefix          string
-		namespace       string
-		createNamespace bool
-		valuesFiles     []string
-		set             []string
-		version         string
-		repo            string
-		includeHooks    bool
-		skipCRDs        bool
-	}
+	var args installArgs
 
 	cmd := &cobra.Command{
 		Use:   "install <release-name> <chart-ref>",
@@ -28,23 +32,24 @@ func newInstallCmd() *cobra.Command {
 The chart reference may be an oci:// reference, a local chart directory, or a
 chart name resolved against --repo.
 
-Install creates two spaces (if missing): the base variant space
-<component>-base holding the rendered units, and the helm source space
-<component>-helm holding one HelmSource unit per release with the chart
+The rendered chart is uploaded into the component's base variant space,
+<component>-base, which the upload creates if missing. The helm source space
+<component>-helm holds one HelmSource unit per release with the chart
 reference, values, and options. The component defaults to the release name.
 
-Rendered output becomes one unit per chart template file, named from the
-chart's file layout: templates/backend.yaml becomes unit "backend",
-templates/rbac/role.yaml becomes "rbac-role", crds/foo.yaml becomes
-"crds-foo", and subchart files are prefixed with the subchart name. When a
-component contains multiple releases, each release's units are namespaced
-with --prefix (defaulted to the release name for the second and later
-releases).
+Every rendered resource becomes its own unit. A workload's unit is named after
+it, and any other resource's after its name and kind, with the release name
+dropped from the front: release "cubbychat" renders Deployment cubbychat-backend
+as unit "backend" and its Service as "backend-service". Each unit records the
+chart template it came from in its UploadFile annotation. When a component
+contains multiple releases, each release's new units are prefixed with --prefix
+(defaulted to the release name for the second and later releases).
 
-The base is untargeted. If --namespace is not given, the release renders with
-the confighubplaceholder namespace, which each deployment fills:
-
-  cub variant create <variant> <component>-base --target <space>/<target> --namespace <ns>
+The chart is rendered into its release namespace, --namespace, which defaults to
+the release name. Charts write .Release.Namespace into places set-namespace
+cannot rewrite, so the base carries a real namespace rather than a placeholder.
+To run the chart in another namespace, install it under another component with
+that --namespace.
 
 Hook manifests are dropped by default because Helm's hook lifecycle cannot run
 without Helm; --include-hooks keeps them as plain resources. The lookup
@@ -57,7 +62,7 @@ Examples:
   cub helm install cubbychat oci://ghcr.io/confighub/charts/cubbychat
 
   # Add a second chart to the same component; its units are prefixed "pg-"
-  cub helm install --component cubbychat --prefix pg pg oci://registry-1.docker.io/bitnamicharts/postgresql
+  cub helm install --component cubbychat --namespace cubbychat --prefix pg pg oci://registry-1.docker.io/bitnamicharts/postgresql
 
   # Explicit namespace and a synthesized Namespace unit
   cub helm install --namespace cert-manager --create-namespace cert-manager jetstack/cert-manager --version v1.17.1
@@ -68,82 +73,94 @@ Examples:
 		SilenceErrors: true,
 		PreRunE:       ensureClient,
 		RunE: func(cmd *cobra.Command, positional []string) error {
-			releaseName := positional[0]
-			chartRef := positional[1]
-
-			component := args.component
-			if component == "" {
-				component = makeSlug(releaseName)
-			} else {
-				component = makeSlug(component)
-			}
-
-			values, err := helmutils.MergeValues(args.valuesFiles, args.set)
-			if err != nil {
-				return err
-			}
-
-			spaces, err := ensureComponentSpaces(component)
-			if err != nil {
-				return err
-			}
-
-			others, err := listHelmSources(spaces.source.SpaceID)
-			if err != nil {
-				return err
-			}
-
-			// The prefix defaults to empty for the component's first release
-			// and to the release name for subsequent releases.
-			prefix := args.prefix
-			if !cmd.Flags().Changed("prefix") && countOtherReleases(others, releaseName) > 0 {
-				prefix = makeSlug(releaseName)
-			}
-			if err := checkPrefixConflict(others, releaseName, prefix); err != nil {
-				return err
-			}
-
-			src := &helmutils.HelmSource{
-				APIVersion: helmutils.HelmSourceAPIVersion,
-				Kind:       helmutils.HelmSourceKind,
-				Metadata:   helmutils.HelmSourceMetadata{Name: releaseName},
-				Spec: helmutils.HelmSourceSpec{
-					Chart: helmutils.HelmSourceChart{
-						Ref:     chartRef,
-						Repo:    args.repo,
-						Version: args.version,
-					},
-					Release: helmutils.HelmSourceRelease{
-						Name:      releaseName,
-						Namespace: args.namespace,
-					},
-					CreateNamespace: args.createNamespace,
-					UnitPrefix:      prefix,
-					IncludeHooks:    args.includeHooks,
-					SkipCRDs:        args.skipCRDs,
-					Values:          values,
-				},
-			}
-
-			return applyHelmSource(src, component, spaces)
+			return runInstall(cmd, &args, positional[0], positional[1], args.dryRun)
 		},
 	}
 
+	addInstallFlags(cmd, &args)
+	cmd.Flags().BoolVar(&args.dryRun, "dry-run", false, "report the units the upload would create, update, or empty, and write nothing")
+	return cmd
+}
+
+// addInstallFlags registers the flags install and template share.
+func addInstallFlags(cmd *cobra.Command, args *installArgs) {
 	f := cmd.Flags()
 	f.StringVar(&args.component, "component", "", "component to install into (defaults to the release name); spaces <component>-helm and <component>-base are created if missing")
-	f.StringVar(&args.prefix, "prefix", "", "prefix for generated unit slugs; required to be unique per release within a component, and empty for at most one release")
-	f.StringVar(&args.namespace, "namespace", "", "release namespace, recorded and rendered literally; when omitted the placeholder namespace is used and deployments set it via 'cub variant create --namespace'")
+	f.StringVar(&args.prefix, "prefix", "", "prefix for the slugs of the units this release creates; required to be unique per release within a component, and empty for at most one release")
+	f.StringVar(&args.namespace, "namespace", "", "release namespace the chart is rendered into (defaults to the release name)")
 	f.BoolVar(&args.createNamespace, "create-namespace", false, "synthesize a Namespace unit for the release namespace (skipped when the chart renders one itself)")
 	f.StringArrayVarP(&args.valuesFiles, "values", "f", []string{}, "specify values in a YAML file (can specify multiple)")
 	f.StringArrayVar(&args.set, "set", []string{}, "set values on the command line (can specify multiple or separate values with commas: key1=val1,key2=val2)")
 	f.StringVar(&args.version, "version", "", "chart version constraint: a specific version (e.g. 1.1.1) or a range (e.g. ^2.0.0)")
 	f.StringVar(&args.repo, "repo", "", "chart repository URL to resolve a bare chart name against")
 	f.BoolVar(&args.includeHooks, "include-hooks", false, "keep helm.sh/hook manifests as plain resources instead of dropping them")
-	f.BoolVar(&args.skipCRDs, "skip-crds", false, "do not generate units from the chart's crds/ directories (mirrors 'helm install --skip-crds')")
-	f.BoolVar(&wait, "wait", true, "wait for triggers to finish on each written unit")
+	f.BoolVar(&args.skipCRDs, "skip-crds", false, "do not upload the chart's crds/ directories (mirrors 'helm install --skip-crds')")
 	f.BoolVar(&quiet, "quiet", false, "no per-unit output")
+}
 
-	return cmd
+// runInstall renders a chart as a new or re-installed release and uploads it.
+func runInstall(cmd *cobra.Command, args *installArgs, releaseName, chartRef string, dryRun bool) error {
+	component := makeSlug(releaseName)
+	if args.component != "" {
+		component = makeSlug(args.component)
+	}
+
+	values, err := helmrender.MergeValues(args.valuesFiles, args.set)
+	if err != nil {
+		return err
+	}
+
+	// The source space exists once the component has a release; its HelmSources
+	// decide the prefix default and are checked for prefix conflicts.
+	var others []helmSourceUnit
+	source, err := cub.SpaceBySlug(component + helmSourceSpaceSuffix)
+	if err != nil {
+		return err
+	}
+	if source != nil {
+		if others, err = listHelmSources(source.SpaceID); err != nil {
+			return err
+		}
+	}
+
+	// The prefix defaults to empty for the component's first release and to the
+	// release name for subsequent releases.
+	prefix := args.prefix
+	if !cmd.Flags().Changed("prefix") && countOtherReleases(others, releaseName) > 0 {
+		prefix = makeSlug(releaseName)
+	}
+	if err := checkPrefixConflict(others, releaseName, prefix); err != nil {
+		return err
+	}
+
+	namespace := args.namespace
+	if namespace == "" {
+		namespace = releaseName
+	}
+
+	src := &helmrender.HelmSource{
+		APIVersion: helmrender.HelmSourceAPIVersion,
+		Kind:       helmrender.HelmSourceKind,
+		Metadata:   helmrender.HelmSourceMetadata{Name: releaseName},
+		Spec: helmrender.HelmSourceSpec{
+			Chart: helmrender.HelmSourceChart{
+				Ref:     chartRef,
+				Repo:    args.repo,
+				Version: args.version,
+			},
+			Release: helmrender.HelmSourceRelease{
+				Name:      releaseName,
+				Namespace: namespace,
+			},
+			CreateNamespace: args.createNamespace,
+			UnitPrefix:      prefix,
+			IncludeHooks:    args.includeHooks,
+			SkipCRDs:        args.skipCRDs,
+			Values:          values,
+		},
+	}
+
+	return applyHelmSource(src, component, dryRun)
 }
 
 // countOtherReleases counts HelmSources other than the given release.

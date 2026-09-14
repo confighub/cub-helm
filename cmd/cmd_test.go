@@ -2,10 +2,10 @@ package cmd
 
 import (
 	"bytes"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/confighub/cub-helm/internal/helmrender"
 )
 
 func TestRootHasAllSubcommands(t *testing.T) {
@@ -50,37 +50,47 @@ func TestMakeSlug(t *testing.T) {
 	}
 }
 
-// TestTemplateOffline renders a minimal local chart and checks that the
-// template command works without a server connection.
-func TestTemplateOffline(t *testing.T) {
-	dir := t.TempDir()
-	chart := filepath.Join(dir, "demo")
-	if err := os.MkdirAll(filepath.Join(chart, "templates"), 0o755); err != nil {
-		t.Fatal(err)
+// A release's upload names the component's base, owns its Units by release
+// name, and prefixes new slugs with the unit prefix and a "-".
+func TestUploadRequest(t *testing.T) {
+	src := &helmrender.HelmSource{
+		Spec: helmrender.HelmSourceSpec{
+			Chart:           helmrender.HelmSourceChart{Ref: "oci://example.com/charts/pg"},
+			Release:         helmrender.HelmSourceRelease{Name: "pg"},
+			UnitPrefix:      "pg",
+			CreateNamespace: true,
+		},
 	}
-	writeFile(t, filepath.Join(chart, "Chart.yaml"), "apiVersion: v2\nname: demo\nversion: 0.1.0\n")
-	writeFile(t, filepath.Join(chart, "templates", "cm.yaml"),
-		"apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: {{ .Release.Name }}-cm\ndata:\n  hello: world\n")
+	result := &helmrender.Result{
+		Files: []helmrender.File{
+			{Path: "pg/templates/statefulset.yaml", Content: "---\n# Source: pg/templates/statefulset.yaml\n"},
+			{Path: "pg/templates/config.tpl", Content: "---\n# Source: pg/templates/config.tpl\n"},
+		},
+		UnitLabels:      map[string]string{helmrender.HelmChartLabel: "postgresql", helmrender.HelmReleaseLabel: "pg"},
+		ResolvedVersion: "16.2.0",
+	}
 
-	out := filepath.Join(dir, "out")
-	r := NewRootCmd()
-	r.SetArgs([]string{"template", "demo", chart, "--output-dir", out})
-	if err := r.Execute(); err != nil {
-		t.Fatal(err)
+	req := uploadRequest(src, "cubbychat", result)
+	if len(req.Components) != 1 {
+		t.Fatalf("expected one component, got %d", len(req.Components))
 	}
-
-	got, err := os.ReadFile(filepath.Join(out, "cm.yaml"))
-	if err != nil {
-		t.Fatalf("expected rendered unit file: %v", err)
+	c := req.Components[0]
+	if c.Name != "cubbychat" || c.Space != "cubbychat-base" || c.SourceName != "pg" {
+		t.Errorf("component = %+v, want cubbychat in cubbychat-base owned by pg", c)
 	}
-	if !strings.Contains(string(got), "demo-cm") {
-		t.Errorf("rendered unit missing release name substitution: %q", got)
+	if c.Namespace != "pg" {
+		t.Errorf("namespace = %q, want the release name", c.Namespace)
 	}
-}
-
-func writeFile(t *testing.T, path, content string) {
-	t.Helper()
-	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
-		t.Fatal(err)
+	if c.SlugPrefix != "pg-" || !c.CreateNamespace {
+		t.Errorf("SlugPrefix = %q, CreateNamespace = %v", c.SlugPrefix, c.CreateNamespace)
+	}
+	if req.SpaceLabels["Variant"] != "base" {
+		t.Errorf("SpaceLabels = %v, want Variant=base", req.SpaceLabels)
+	}
+	if got := []string{req.Files[0].Path, req.Files[1].Path}; got[0] != "pg/templates/statefulset.yaml" || got[1] != "pg/templates/config.tpl.yaml" {
+		t.Errorf("file paths = %v", got)
+	}
+	if !strings.Contains(req.ChangeDescription, "postgresql 16.2.0") {
+		t.Errorf("ChangeDescription = %q", req.ChangeDescription)
 	}
 }
