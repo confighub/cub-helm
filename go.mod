@@ -5,10 +5,12 @@ go 1.25.0
 toolchain go1.25.11
 
 require (
-	github.com/confighub/sdk/bridge-impl v0.2.10
-	github.com/confighub/sdk/core v0.4.15
+	github.com/confighub/sdk/core v0.4.20
 	github.com/google/uuid v1.6.0
 	github.com/spf13/cobra v1.10.2
+	github.com/stretchr/testify v1.11.1
+	helm.sh/helm/v3 v3.20.2
+	sigs.k8s.io/yaml v1.6.0
 )
 
 require (
@@ -118,7 +120,6 @@ require (
 	gopkg.in/evanphx/json-patch.v4 v4.13.0 // indirect
 	gopkg.in/inf.v0 v0.9.1 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect
-	helm.sh/helm/v3 v3.20.2 // indirect
 	k8s.io/api v0.35.1 // indirect
 	k8s.io/apiextensions-apiserver v0.35.1 // indirect
 	k8s.io/apimachinery v0.35.1 // indirect
@@ -136,11 +137,10 @@ require (
 	sigs.k8s.io/kustomize/kyaml v0.20.1 // indirect
 	sigs.k8s.io/randfill v1.0.0 // indirect
 	sigs.k8s.io/structured-merge-diff/v6 v6.3.0 // indirect
-	sigs.k8s.io/yaml v1.6.0 // indirect
 )
 
-// These version pins mirror those in github.com/confighub/sdk/bridge-impl,
-// whose own replace directives do not apply transitively to this module.
+// These version pins mirror those in github.com/confighub/sdk/core, whose own
+// replace directives do not apply transitively to this module.
 replace (
 	// Fix CVE-2022-28948
 	gopkg.in/yaml.v3 => gopkg.in/yaml.v3 v3.0.1

@@ -28,7 +28,7 @@ cub helm install cubbychat oci://ghcr.io/confighub/charts/cubbychat
 
 This creates two [spaces](https://docs.confighub.com/background/entities/space/), grouped into the component by labels:
 
-- `<component>-base` — the base: the rendered [units](https://docs.confighub.com/background/entities/unit/), one per chart template file. It has no [target](https://docs.confighub.com/background/entities/target/); it exists to create deployments from.
+- `<component>-base` — the base: the rendered [units](https://docs.confighub.com/background/entities/unit/), one per resource. It has no [target](https://docs.confighub.com/background/entities/target/); it exists to create deployments from.
 - `<component>-helm` — the record of where the base came from: a single `HelmSource` unit holding the chart reference, version, and values. Upgrades regenerate the base from this record.
 
 The component defaults to the release name; pass `--component` to install into a named component (see [Multiple charts in one component](#multiple-charts-in-one-component)).
@@ -41,20 +41,22 @@ List the component's spaces:
 cub space list --where "Labels.Component = 'cubbychat'"
 ```
 
-The base holds one unit per chart template file, named from the chart's file layout, so the chart author's file organization defines how the component's configuration is split:
+The rendered chart is uploaded into the base, which holds one unit per resource:
 
 ```bash
 cub unit list --space cubbychat-base
 ```
 
-| Chart file | Unit slug |
-| --- | --- |
-| `templates/backend.yaml` | `backend` |
-| `templates/rbac/role.yaml` | `rbac-role` |
-| `crds/widget.yaml` | `crds-widget` |
-| `charts/postgres/templates/statefulset.yaml` | `postgres-statefulset` |
+A workload's unit is named after the workload, and any other resource's unit after its name and kind. A leading `<component>-` is dropped from the name, so Helm's usual `<release>-<name>` names read as their short form when the release and the component share a name:
 
-Each unit is ordinary Kubernetes YAML and carries labels (`HelmChart`, `HelmRelease`, chart version, app version) tracing it back to the chart that generated it. Inspect one:
+| Resource | Unit slug |
+| --- | --- |
+| Deployment `cubbychat-backend` | `backend` |
+| Service `cubbychat-backend` | `backend-service` |
+| Role `cubbychat-reader` | `reader-role` |
+| CustomResourceDefinition `widgets.example.com` | `widgets.example.com-crd` |
+
+Each unit is ordinary Kubernetes YAML. It records the chart template it came from in its `UploadFile` annotation, such as `cubbychat/charts/postgres/templates/statefulset.yaml`, and carries labels (`HelmChart`, `HelmRelease`, chart version, app version) tracing it back to the chart. Inspect one:
 
 ```bash
 cub unit data --space cubbychat-base backend
@@ -78,15 +80,15 @@ The resolved values are stored in the `HelmSource` unit. They are the source of 
 
 Specifying the namespace and creating the Namespace resource are separate concerns, as they are in Helm itself.
 
-By default — when you omit `--namespace` — the chart renders with the placeholder namespace `confighubplaceholder`. The base does not decide where it will run; each deployment fills in its own namespace. This is a [placeholder](https://docs.confighub.com/background/concepts/placeholders/): a value that must be replaced before the configuration is deployable. Creating a deployment with `cub variant create --namespace <ns>` replaces it throughout that deployment (see [Create a deployment](#create-a-deployment)).
+The chart is rendered into its release namespace, `--namespace`, which defaults to the release name. The base carries that real namespace rather than a placeholder: charts write `.Release.Namespace` into places that `set-namespace` cannot rewrite, such as ConfigMap data, command-line flags, and webhook service references, so a namespace substituted after rendering would be missed in some of them. The namespace is recorded in the base's `Namespace` label.
 
-Pass `--namespace <ns>` to render a specific namespace literally instead — appropriate when the component will only ever run in one namespace.
+Resources the chart places in other namespaces, such as a RoleBinding in `kube-system`, stay in the same base with their namespaces as rendered.
 
-`--create-namespace` synthesizes a Namespace unit for the release namespace, mirroring `helm install --create-namespace`. It is skipped automatically when the chart already renders its own Namespace, so you never get a duplicate. Without it, the namespace is assumed to be managed elsewhere.
+`--create-namespace` synthesizes a Namespace unit for the release namespace, mirroring `helm install --create-namespace`. It is skipped automatically when the chart already renders its own Namespace, so you never get a duplicate. Without it, the namespace is assumed to be managed elsewhere, and the install output lists the references to it that nothing in the chart provides.
 
 ## CRDs
 
-CRDs shipped in a chart's `crds/` directory become their own units — one per file, named `crds-<file>` — because CRDs have a different lifecycle than the application resources. `--skip-crds` omits them (mirroring `helm install --skip-crds`); it does not affect CRDs emitted from `templates/`, which belong to their template file's unit like any other resource.
+CRDs shipped in a chart's `crds/` directory become units like any other resource, named `<name>-crd`. `--skip-crds` omits them, mirroring `helm install --skip-crds`; it does not affect CRDs emitted from `templates/`.
 
 ## Hooks and limitations
 
@@ -106,11 +108,10 @@ The base is not deployed directly. A deployment is a [variant](https://docs.conf
 
 ```bash
 cub variant create dev cubbychat-base \
-    --target dev-cluster/oci \
-    --namespace cubbychat
+    --target dev-cluster/oci
 ```
 
-`--namespace` fills the `confighubplaceholder` placeholder so this deployment lands in its own namespace, and `--target` binds its units for release. See [Creating and managing variants](https://docs.confighub.com/guide/variants/) for the full workflow, including promotion and release.
+`--target` binds the deployment's units for release, and the deployment runs in the base's namespace. `cub variant create --namespace` can move it to another, but it rewrites only resource namespaces and the references to them that it knows, not the places a chart may also have written `.Release.Namespace`. To run a chart in another namespace, install it under another component with that `--namespace`. See [Creating and managing variants](https://docs.confighub.com/guide/variants/) for the full workflow, including promotion and release.
 
 ## Customize
 
@@ -142,7 +143,7 @@ cub helm upgrade cubbychat --set ai.enabled=true
 cub helm upgrade cubbychat
 ```
 
-Regeneration reconciles the base: changed units are updated, units for new chart files are created, and units whose chart file disappeared are deleted. The change stops at the base; promote it into each deployment when you are ready:
+The re-rendered chart is uploaded into the base. A resource that changed is merged into its unit, so an edit made to the base in ConfigHub is kept unless the chart changed the same field. A new resource gets a new unit. A resource the chart no longer renders has its unit emptied, not deleted: the unit keeps its history and links, the next release withdraws the object, and the unit is filled again if the resource returns. Preview an upgrade with `--dry-run`. The change stops at the base; promote it into each deployment when you are ready:
 
 ```bash
 cub variant promote cubbychat-dev
@@ -156,27 +157,25 @@ cub unit diff backend --space cubbychat-base --from 1
 
 ## Multiple charts in one component
 
-A component can be built from more than one chart. Install additional releases into the same component with `--component`, and give each a `--prefix` so their unit names do not collide:
+A component can be built from more than one chart. Install additional releases into the same component with `--component`:
 
 ```bash
 cub helm install cubbychat oci://ghcr.io/confighub/charts/cubbychat
-cub helm install --component cubbychat --prefix pg \
+cub helm install --component cubbychat --namespace cubbychat \
     pg oci://registry-1.docker.io/bitnamicharts/postgresql
 ```
 
-The second release's units are prefixed (`pg-statefulset`, `pg-service`, …). One release per component may use an empty prefix; the rest must be prefixed.
+Each release's units are named from its own resources, which charts usually name after the release (`pg-postgresql`). When two releases do render a resource with the same name, such as a CRD both charts ship, the later one's unit gets a numbered slug, and the install warns that both units define the same object, so you can decide which release should own it. Each release owns the units it wrote, so upgrading one release never updates or empties another's.
 
 ## Preview without installing
 
-`cub helm template` renders a chart and shows the units `cub helm install` would create, without a server connection or any ConfigHub state:
+`cub helm template` renders a chart and shows what `cub helm install` would do with it: the units it would create, and on a component that already has the release, those it would update or empty. It writes nothing, and takes the same flags as install; it is the same as `cub helm install --dry-run`. The server decides the units, so it needs a server connection.
 
 ```bash
-# Preview to stdout
 cub helm template cubbychat oci://ghcr.io/confighub/charts/cubbychat
-
-# Write one file per unit
-cub helm template cubbychat ./charts/cubbychat --output-dir ./out
 ```
+
+To see the rendered YAML itself, use `helm template`.
 
 ## Troubleshooting
 

@@ -5,7 +5,7 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/confighub/sdk/bridge-impl/helmutils"
+	"github.com/confighub/cub-helm/internal/helmrender"
 )
 
 func newUpgradeCmd() *cobra.Command {
@@ -19,6 +19,7 @@ func newUpgradeCmd() *cobra.Command {
 		repo            string
 		includeHooks    bool
 		skipCRDs        bool
+		dryRun          bool
 	}
 
 	cmd := &cobra.Command{
@@ -28,9 +29,12 @@ func newUpgradeCmd() *cobra.Command {
 
 The release's HelmSource unit is the source of truth: flags patch it first
 (--version replaces the chart version constraint; -f/--set replace the stored
-values), then the chart is re-rendered from the HelmSource alone and the base
-space's units are reconciled — changed units are updated, units for new chart
-files are created, and units whose chart file disappeared are deleted.
+values), then the chart is re-rendered from the HelmSource alone and uploaded
+into the base space: changed resources are merged into their units, keeping
+edits made in ConfigHub unless the chart changed the same field; new resources
+get new units; and the units of resources the chart no longer renders are
+emptied, not deleted, so they keep their history and return if the resource
+does.
 
 With no flags, upgrade is a plain re-render, which is how a hand-edit of the
 HelmSource unit is applied.
@@ -64,12 +68,12 @@ Examples:
 				component = makeSlug(component)
 			}
 
-			spaces, err := getComponentSpaces(component)
+			source, err := getSourceSpace(component)
 			if err != nil {
 				return err
 			}
 
-			sourceUnit, err := cub.UnitBySlug(spaces.source.SpaceID, makeSlug(releaseName))
+			sourceUnit, err := cub.UnitBySlug(source.SpaceID, makeSlug(releaseName))
 			if err != nil {
 				return err
 			}
@@ -80,7 +84,7 @@ Examples:
 			if err != nil {
 				return fmt.Errorf("failed to read HelmSource unit %q: %w", sourceUnit.Slug, err)
 			}
-			src, err := helmutils.ParseHelmSource([]byte(data))
+			src, err := helmrender.ParseHelmSource([]byte(data))
 			if err != nil {
 				return err
 			}
@@ -105,14 +109,14 @@ Examples:
 				src.Spec.SkipCRDs = args.skipCRDs
 			}
 			if len(args.valuesFiles) > 0 || len(args.set) > 0 {
-				values, err := helmutils.MergeValues(args.valuesFiles, args.set)
+				values, err := helmrender.MergeValues(args.valuesFiles, args.set)
 				if err != nil {
 					return err
 				}
 				src.Spec.Values = values
 			}
 
-			return applyHelmSource(src, component, spaces)
+			return applyHelmSource(src, component, args.dryRun)
 		},
 	}
 
@@ -126,7 +130,7 @@ Examples:
 	f.StringVar(&args.repo, "repo", "", "change the chart repository URL")
 	f.BoolVar(&args.includeHooks, "include-hooks", false, "change whether helm.sh/hook manifests are kept as plain resources")
 	f.BoolVar(&args.skipCRDs, "skip-crds", false, "change whether crds/ directories are skipped")
-	f.BoolVar(&wait, "wait", true, "wait for triggers to finish on each written unit")
+	f.BoolVar(&args.dryRun, "dry-run", false, "report the units the upload would update, create, or empty, and write nothing")
 	f.BoolVar(&quiet, "quiet", false, "no per-unit output")
 
 	return cmd
