@@ -20,7 +20,7 @@ const (
 	variantLabelBase      = "base"
 	variantLabelHelm      = "helm-source"
 
-	toolchainConfigHubYAML = "ConfigHub/YAML"
+	toolchainAppConfigYAML = "AppConfig/YAML"
 )
 
 // ensureSourceSpace gets or creates the component's helm source space, and

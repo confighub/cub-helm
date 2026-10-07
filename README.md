@@ -23,7 +23,7 @@ cub plugin install confighub/cub-helm
 ```
 
 This downloads the latest release for your platform and registers the `helm`
-command. Verify with:
+command. It needs a ConfigHub server at v0.8.4 or later. Verify with:
 
 ```
 cub helm version

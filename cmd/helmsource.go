@@ -245,7 +245,7 @@ func upsertHelmSourceUnit(sourceSpaceID uuid.UUID, src *helmrender.HelmSource, l
 		created, err := cub.CreateUnit(sourceSpaceID, goclient.Unit{
 			SpaceID:       sourceSpaceID,
 			Slug:          slug,
-			ToolchainType: toolchainConfigHubYAML,
+			ToolchainType: toolchainAppConfigYAML,
 			Labels:        labels,
 		})
 		if err != nil {
