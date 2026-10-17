@@ -1,6 +1,6 @@
 # Using Helm Charts with ConfigHub
 
-`cub helm` installs a Helm chart as a ConfigHub [component](https://docs.confighub.com/background/concepts/component/). The chart is rendered on your machine and the rendered output becomes the component's [base](https://docs.confighub.com/background/concepts/base/) — the shared configuration that [deployments](https://docs.confighub.com/background/concepts/variant/) are created from. From there you work with the chart's output the ConfigHub way: full revision history, review before apply, and changes that flow from the base out to each place the component runs.
+`cub helm` installs a Helm chart as a ConfigHub [component](https://docs.confighub.com/background/concepts/component/). The chart is rendered on your machine and the rendered output becomes the component's [base](https://docs.confighub.com/background/concepts/base/) — the shared configuration that [deployments](https://docs.confighub.com/background/concepts/variant/) are created from. From there you work with the chart's output the ConfigHub way: full revision history, review before release, and changes that flow from the base out to each place the component runs.
 
 `cub helm` is distributed as a ConfigHub CLI plugin. Install it once with:
 
@@ -26,19 +26,20 @@ The chart reference may be an `oci://` reference, a local chart directory, or a 
 cub helm install cubbychat oci://ghcr.io/confighub/charts/cubbychat
 ```
 
-This creates two [spaces](https://docs.confighub.com/background/entities/space/), grouped into the component by labels:
+This creates the `cubbychat` component, if it does not exist yet, and two [spaces](https://docs.confighub.com/background/entities/space/):
 
-- `<component>-base` — the base: the rendered [units](https://docs.confighub.com/background/entities/unit/), one per resource. It has no [target](https://docs.confighub.com/background/entities/target/); it exists to create deployments from.
-- `<component>-helm` — the record of where the base came from: a single `HelmSource` unit holding the chart reference, version, and values. Upgrades regenerate the base from this record.
+- `<component>-base` — the base: the rendered [units](https://docs.confighub.com/background/entities/unit/), one per resource. It is a variant of the component, which it names in its `ComponentID`, with the `Variant` label `base`. It has no [target](https://docs.confighub.com/background/entities/target/); it exists to create deployments from.
+- `<component>-helm` — the record of where the base came from: a `HelmSource` unit per release, holding the chart reference, version, and values. Upgrades regenerate the base from this record. It is found by its name and is not a variant of the component, since there is nothing in it to promote or release.
 
 The component defaults to the release name; pass `--component` to install into a named component (see [Multiple charts in one component](#multiple-charts-in-one-component)).
 
 ### What gets created
 
-List the component's spaces:
+The component's variants are the spaces that name it. List them, or draw them as a tree:
 
 ```bash
-cub space list --where "Labels.Component = 'cubbychat'"
+cub space list --component cubbychat
+cub component tree cubbychat
 ```
 
 The rendered chart is uploaded into the base, which holds one unit per resource:
@@ -107,11 +108,17 @@ The same boundary applies to `lookup` (returns empty) and `.Capabilities` (Helm 
 The base is not deployed directly. A deployment is a [variant](https://docs.confighub.com/background/concepts/variant/) of the component, created from the base and pointed at a target:
 
 ```bash
-cub variant create dev cubbychat-base \
+cub variant create dev cubbychat/base \
     --target dev-cluster/oci
 ```
 
-`--target` binds the deployment's units for release, and the deployment runs in the base's namespace. `cub variant create --namespace` can move it to another, but it rewrites only resource namespaces and the references to them that it knows, not the places a chart may also have written `.Release.Namespace`. To run a chart in another namespace, install it under another component with that `--namespace`. See [Creating and managing variants](https://docs.confighub.com/guide/variants/) for the full workflow, including promotion and release.
+A variant is named `<component>/<variant>`, so this creates `cubbychat/dev`, stored in the space `cubbychat-dev`. `--target` makes it a deployment of that target: its units are released to it. Nothing runs until you publish a [Release](https://docs.confighub.com/background/entities/release/), an immutable bundle of the deployment's configuration that the GitOps operator in the cluster, Argo CD or Flux, pulls:
+
+```bash
+cub release publish cubbychat/dev
+```
+
+The deployment runs in the base's namespace. `cub variant create --namespace` can move it to another, but it rewrites only resource namespaces and the references to them that it knows, not the places a chart may also have written `.Release.Namespace`. To run a chart in another namespace, install it under another component with that `--namespace`. See [Creating and managing variants](https://docs.confighub.com/guide/variants/) for the full workflow, including promotion and release.
 
 ## Customize
 
@@ -119,13 +126,19 @@ Do not edit the units in the base directly to customize a single environment —
 
 - To change chart values or the chart version for everyone, run `cub helm upgrade` (below). The change lands in the base and flows to deployments through promotion.
 - To change how the rendered configuration behaves for everyone, edit the base units — with `cub unit edit` or a [function](https://docs.confighub.com/guide/functions/) — then promote.
-- To change one deployment only, edit that deployment's units. ConfigHub records the change as owned by that unit, so a later promotion from the base will not clobber it.
-
-Changes reach deployments only when you promote:
+- To change one deployment only, edit that deployment's units, with `--protect` to keep the value: it records the paths the change writes as the deployment's own, so a later promotion from the base leaves them alone. Without it, a later change the base makes to the same field overwrites the edit.
 
 ```bash
-cub variant promote cubbychat-dev --dry-run -o mutations   # preview
-cub variant promote cubbychat-dev
+cub function set --variant cubbychat/dev --resource Deployment/cubbychat-backend \
+    --protect set-replicas 3
+```
+
+Changes reach deployments only when you promote, and go live only when you release:
+
+```bash
+cub variant promote cubbychat/dev --dry-run -o mutations   # preview
+cub variant promote cubbychat/dev
+cub release publish cubbychat/dev
 ```
 
 ## Upgrade
@@ -143,10 +156,11 @@ cub helm upgrade cubbychat --set ai.enabled=true
 cub helm upgrade cubbychat
 ```
 
-The re-rendered chart is uploaded into the base. A resource that changed is merged into its unit, so an edit made to the base in ConfigHub is kept unless the chart changed the same field. A new resource gets a new unit. A resource the chart no longer renders has its unit emptied, not deleted: the unit keeps its history and links, the next release withdraws the object, and the unit is filled again if the resource returns. Preview an upgrade with `--dry-run`. The change stops at the base; promote it into each deployment when you are ready:
+The re-rendered chart is uploaded into the base. A resource that changed is merged into its unit, so an edit made to the base in ConfigHub is kept unless the chart changed the same field. A new resource gets a new unit. A resource the chart no longer renders has its unit emptied, not deleted: the unit keeps its history and links, the next release withdraws the object, and the unit is filled again if the resource returns. Preview an upgrade with `--dry-run`. The change stops at the base; promote it into each deployment and release it when you are ready:
 
 ```bash
-cub variant promote cubbychat-dev
+cub variant promote cubbychat/dev
+cub release publish cubbychat/dev
 ```
 
 Because the base and its deployments are versioned units, every upgrade is a reviewable revision. You can diff before promoting:
@@ -191,4 +205,4 @@ Missing resources after install. If a resource you expected is absent, it was li
 
 ## Summary
 
-`cub helm` brings the Helm ecosystem into the component/variant model: a chart is rendered client-side into a component's base, deployments are created from that base with `cub variant create`, and chart upgrades flow from the base to each deployment through `cub variant promote`. You get Helm's charts and values together with ConfigHub's revision history, review, and safe promotion — as long as the chart renders without a cluster.
+`cub helm` brings the Helm ecosystem into the component/variant model: a chart is rendered client-side into a component's base, deployments are created from that base with `cub variant create`, chart upgrades flow from the base to each deployment through `cub variant promote`, and `cub release publish` makes each deployment's configuration live. You get Helm's charts and values together with ConfigHub's revision history, review, and safe promotion — as long as the chart renders without a cluster.
