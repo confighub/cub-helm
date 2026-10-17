@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
+
 	"github.com/confighub/cub-helm/internal/helmrender"
 )
 
@@ -91,5 +93,25 @@ func TestUploadRequest(t *testing.T) {
 	}
 	if !strings.Contains(req.ChangeDescription, "postgresql 16.2.0") {
 		t.Errorf("ChangeDescription = %q", req.ChangeDescription)
+	}
+}
+
+// The helm source space is found by its slug and records the base it
+// generates. It is not a Variant of the Component, so it carries no Component
+// label and names no ComponentID: the Component is an entity the base names.
+func TestNewSourceSpace(t *testing.T) {
+	baseID := uuid.MustParse("7c61626f-ddbe-41af-93f6-b69f4ab6d308")
+	s := newSourceSpace("cubbychat", baseID)
+	if s.Slug != "cubbychat-helm" {
+		t.Errorf("Slug = %q, want cubbychat-helm", s.Slug)
+	}
+	if s.Labels["Variant"] != "helm-source" {
+		t.Errorf("Labels = %v, want Variant=helm-source", s.Labels)
+	}
+	if _, ok := s.Labels["Component"]; ok {
+		t.Errorf("Labels = %v, want no Component label", s.Labels)
+	}
+	if s.Annotations[AnnotationGeneratesSpaceID] != baseID.String() {
+		t.Errorf("Annotations = %v, want %s=%s", s.Annotations, AnnotationGeneratesSpaceID, baseID)
 	}
 }

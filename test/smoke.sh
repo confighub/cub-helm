@@ -121,6 +121,8 @@ function helmCleanup {
     $cub space delete --recursive "$SOURCE" || true
     $cub space delete --recursive "${COMP}ns-base" || true
     $cub space delete --recursive "${COMP}ns-helm" || true
+    $cub component delete "$COMP" || true
+    $cub component delete "${COMP}ns" || true
 }
 if [[ -z "$NOCLEANUP" ]] ; then
     trap helmCleanup SIGINT SIGTERM SIGHUP EXIT
@@ -137,12 +139,16 @@ $cub helm install \
   web \
   "$CHART"
 
-# Both spaces exist, stamped with the expected labels.
+# Both spaces exist, stamped with the expected labels. The base is a Variant of
+# the Component the install created; the source space is outside it.
 verifyEntityExists "" space "$BASE"
 verifyEntityExists "" space "$SOURCE"
-checkSpaceMetadataValue "$BASE" '.Space.Labels.Component' "$COMP"
+verifyEntityExists "" component "$COMP"
+compID=$($cub component get "$COMP" -o jq='.Component.ComponentID')
+checkSpaceMetadataValue "$BASE" '.Space.ComponentID' "$compID"
 checkSpaceMetadataValue "$BASE" '.Space.Labels.Variant' "base"
 checkSpaceMetadataValue "$SOURCE" '.Space.Labels.Variant' "helm-source"
+checkSpaceMetadataValue "$SOURCE" '.Space.ComponentID // ""' ""
 
 # The source space's generator annotation points at the base space.
 baseID=$($cub space get "$BASE" -o jq='.Space.SpaceID')

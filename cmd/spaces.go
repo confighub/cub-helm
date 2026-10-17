@@ -33,16 +33,7 @@ func ensureSourceSpace(component string, baseSpaceID uuid.UUID) (*goclient.Space
 		return nil, err
 	}
 	if source == nil {
-		source, err = cub.CreateSpace(goclient.Space{
-			Slug: sourceSlug,
-			Labels: map[string]string{
-				"Component": component,
-				"Variant":   variantLabelHelm,
-			},
-			Annotations: map[string]string{
-				AnnotationGeneratesSpaceID: baseSpaceID.String(),
-			},
-		})
+		source, err = cub.CreateSpace(newSourceSpace(component, baseSpaceID))
 		if err != nil {
 			return nil, err
 		}
@@ -55,6 +46,23 @@ func ensureSourceSpace(component string, baseSpaceID uuid.UUID) (*goclient.Space
 		}
 	}
 	return source, nil
+}
+
+// newSourceSpace is the helm source space created for a component. It is found
+// by its slug, <component>-helm, and is not itself a Variant of the Component:
+// it holds the HelmSource record rather than configuration to promote or
+// release, so it names no ComponentID. The base, which the upload creates, is
+// the Component's Variant.
+func newSourceSpace(component string, baseSpaceID uuid.UUID) goclient.Space {
+	return goclient.Space{
+		Slug: component + helmSourceSpaceSuffix,
+		Labels: map[string]string{
+			"Variant": variantLabelHelm,
+		},
+		Annotations: map[string]string{
+			AnnotationGeneratesSpaceID: baseSpaceID.String(),
+		},
+	}
 }
 
 // getSourceSpace returns the component's helm source space, requiring a prior

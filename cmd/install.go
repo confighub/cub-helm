@@ -32,9 +32,11 @@ The chart reference may be an oci:// reference, a local chart directory, or a
 chart name resolved against --repo.
 
 The rendered chart is uploaded into the component's base variant space,
-<component>-base, which the upload creates if missing. The helm source space
-<component>-helm holds one HelmSource unit per release with the chart
-reference, values, and options. The component defaults to the release name.
+<component>-base. The upload creates the Component and the base if they are
+missing, and the base names the Component in its ComponentID. The helm source
+space <component>-helm holds one HelmSource unit per release with the chart
+reference, values, and options; it is not a variant of the Component. The
+component defaults to the release name.
 
 Every rendered resource becomes its own unit. A workload's unit is named after
 it, and any other resource's after its name and kind, with the component name
@@ -84,7 +86,7 @@ Examples:
 // addInstallFlags registers the flags install and template share.
 func addInstallFlags(cmd *cobra.Command, args *installArgs) {
 	f := cmd.Flags()
-	f.StringVar(&args.component, "component", "", "component to install into (defaults to the release name); spaces <component>-helm and <component>-base are created if missing")
+	f.StringVar(&args.component, "component", "", "component to install into (defaults to the release name); the Component and spaces <component>-helm and <component>-base are created if missing")
 	f.StringVar(&args.namespace, "namespace", "", "release namespace the chart is rendered into (defaults to the release name)")
 	f.BoolVar(&args.createNamespace, "create-namespace", false, "synthesize a Namespace unit for the release namespace (skipped when the chart renders one itself)")
 	f.StringArrayVarP(&args.valuesFiles, "values", "f", []string{}, "specify values in a YAML file (can specify multiple)")
