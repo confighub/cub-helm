@@ -85,7 +85,7 @@ The chart is rendered into its release namespace, `--namespace`, which defaults 
 
 Resources the chart places in other namespaces, such as a RoleBinding in `kube-system`, stay in the same base with their namespaces as rendered.
 
-`--create-namespace` synthesizes a Namespace unit for the release namespace, mirroring `helm install --create-namespace`. It is skipped automatically when the chart already renders its own Namespace, so you never get a duplicate. Without it, the namespace is assumed to be managed elsewhere, and the install output lists the references to it that nothing in the chart provides.
+`--create-namespace` synthesizes a Namespace unit for the release namespace, mirroring `helm install --create-namespace`. It is skipped automatically when the chart already renders its own Namespace, so you never get a duplicate, and for a namespace every cluster already has (`default`, `kube-node-lease`, `kube-public`, `kube-system`). Without it, the namespace is assumed to be managed elsewhere, and the install output lists the references to it that nothing in the chart provides.
 
 ## CRDs
 
