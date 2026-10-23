@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/confighub/sdk/configkit/k8skit"
 	goclient "github.com/confighub/sdk/core/openapi/goclient-new"
 
 	"github.com/confighub/cub-helm/internal/helmrender"
@@ -40,6 +41,10 @@ func applyHelmSource(src *helmrender.HelmSource, component string, dryRun bool) 
 
 	src.Status.ResolvedVersion = result.ResolvedVersion
 	src.Status.AppVersion = result.AppVersion
+
+	if src.Spec.CreateNamespace && k8skit.IsBuiltInNamespace(src.RenderNamespace()) {
+		tprint("Note: --create-namespace was given, but every cluster already has namespace %q, so none was synthesized.", src.RenderNamespace())
+	}
 
 	uploaded, err := cub.Upload(uploadRequest(src, component, result), dryRun)
 	if err != nil {
@@ -89,13 +94,21 @@ func uploadRequest(src *helmrender.HelmSource, component string, result *helmren
 			Name:            component,
 			SourceName:      makeSlug(src.Spec.Release.Name),
 			Namespace:       src.RenderNamespace(),
-			CreateNamespace: src.Spec.CreateNamespace,
+			CreateNamespace: createNamespace(src),
 			Space:           component + baseSpaceSuffix,
 			UnitLabels:      result.UnitLabels,
 		}},
 		SpaceLabels:       map[string]string{"Variant": variantLabelBase},
 		ChangeDescription: fmt.Sprintf("Rendered chart %s %s for Helm release %s", chart, result.ResolvedVersion, src.Spec.Release.Name),
 	}
+}
+
+// createNamespace reports whether the upload should synthesize the release
+// Namespace. A built-in namespace such as kube-system never is: the cluster
+// creates and owns it, and a Unit holding it would make whoever applies the
+// Unit manage it too.
+func createNamespace(src *helmrender.HelmSource) bool {
+	return src.Spec.CreateNamespace && !k8skit.IsBuiltInNamespace(src.RenderNamespace())
 }
 
 // uploadPath names a rendered template in the upload. The server reads only

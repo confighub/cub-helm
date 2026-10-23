@@ -96,6 +96,22 @@ func TestUploadRequest(t *testing.T) {
 	}
 }
 
+// Every cluster has its built-in namespaces, so a release into kube-system
+// asks for no Namespace even with --create-namespace.
+func TestUploadRequestSkipsBuiltInNamespace(t *testing.T) {
+	src := &helmrender.HelmSource{
+		Spec: helmrender.HelmSourceSpec{
+			Chart:           helmrender.HelmSourceChart{Ref: "oci://example.com/charts/csi"},
+			Release:         helmrender.HelmSourceRelease{Name: "csi", Namespace: "kube-system"},
+			CreateNamespace: true,
+		},
+	}
+	req := uploadRequest(src, "csi", &helmrender.Result{})
+	if c := req.Components[0]; c.Namespace != "kube-system" || c.CreateNamespace {
+		t.Errorf("Namespace = %q, CreateNamespace = %v, want kube-system without CreateNamespace", c.Namespace, c.CreateNamespace)
+	}
+}
+
 // The helm source space is found by its slug and records the base it
 // generates. It is not a Variant of the Component, so it carries no Component
 // label and names no ComponentID: the Component is an entity the base names.

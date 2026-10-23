@@ -88,7 +88,7 @@ func addInstallFlags(cmd *cobra.Command, args *installArgs) {
 	f := cmd.Flags()
 	f.StringVar(&args.component, "component", "", "component to install into (defaults to the release name); the Component and spaces <component>-helm and <component>-base are created if missing")
 	f.StringVar(&args.namespace, "namespace", "", "release namespace the chart is rendered into (defaults to the release name)")
-	f.BoolVar(&args.createNamespace, "create-namespace", false, "synthesize a Namespace unit for the release namespace (skipped when the chart renders one itself)")
+	f.BoolVar(&args.createNamespace, "create-namespace", false, "synthesize a Namespace unit for the release namespace (skipped when the chart renders one itself, or the namespace is built in, such as kube-system)")
 	f.StringArrayVarP(&args.valuesFiles, "values", "f", []string{}, "specify values in a YAML file (can specify multiple)")
 	f.StringArrayVar(&args.set, "set", []string{}, "set values on the command line (can specify multiple or separate values with commas: key1=val1,key2=val2)")
 	f.StringVar(&args.version, "version", "", "chart version constraint: a specific version (e.g. 1.1.1) or a range (e.g. ^2.0.0)")
